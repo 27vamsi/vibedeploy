@@ -1,0 +1,20 @@
+// Mirrors the table tests/concurrency/conftest.py creates. The schema itself is
+// picked at runtime through the `schema=` parameter on DATABASE_URL, because
+// every test run provisions a fresh app id.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Note {
+  id      String @id @db.Uuid
+  ownerId String @map("owner_id") @db.Uuid
+  body    String
+
+  @@map("notes")
+}

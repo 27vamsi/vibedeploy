@@ -1,0 +1,17 @@
+{
+  "name": "vibedeploy-shim",
+  "version": "0.5.0-dev.0",
+  "description": "vibedeploy identity shim: per-request identity into every Postgres transaction",
+  "main": "shim.js",
+  "files": [
+    "shim.js",
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "comment": "No dependencies on purpose. The shim is layered on top of an image we did not build, so it must not drag versions in and break the app's own pins. pg and @prisma/client are resolved from the app's own node_modules at runtime.",
+  "dependencies": {},
+  "license": "UNLICENSED",
+  "private": true
+}

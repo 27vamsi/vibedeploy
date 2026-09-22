@@ -1,0 +1,59 @@
+name: vibedeploy-local
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vd_admin
+      POSTGRES_PASSWORD: vd_local_password
+      POSTGRES_DB: vibedeploy
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    command:
+      - postgres
+      - -c
+      - password_encryption=scram-sha-256
+      - -c
+      - max_connections=200
+    ports:
+      - "55432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vd_admin -d vibedeploy"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Transaction pooling is the whole point: it is what breaks session-level
+  # SET and forces us to use set_config(..., true) inside a transaction.
+  # M2's concurrency test runs through here.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.23.1-p3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    ports:
+      - "56432:6432"
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    ports:
+      - "80:80"
+      - "443:443"
+
+volumes:
+  pgdata:
+  caddydata:
+  caddyconfig:

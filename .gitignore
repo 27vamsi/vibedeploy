@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+
+node_modules/
+# Prisma generates its client into node_modules; nothing generated is checked in.
+tests/concurrency/node/prisma/generated/

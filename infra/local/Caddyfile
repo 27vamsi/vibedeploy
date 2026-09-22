@@ -1,0 +1,13 @@
+{
+	# Browsers resolve *.localhost to 127.0.0.1, and Caddy issues its own
+	# cert from an internal CA, so apps get real https locally.
+	local_certs
+	admin 0.0.0.0:2019
+}
+
+# M6 rewrites this block to route <app>.localhost to each app's sidecar.
+# Until then it only proves TLS and routing work.
+*.localhost {
+	tls internal
+	respond "vibedeploy local: no app mounted at {host}" 404
+}

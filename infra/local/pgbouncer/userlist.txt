@@ -1,0 +1,7 @@
+; Only the auth_user lives here. PgBouncer needs its plain-text password to log
+; in and run auth_query; a SCRAM verifier can verify a client but cannot log
+; into a server. Every per-app runtime and migrator role is looked up through
+; auth_query instead, so none of them appear in this file.
+;
+; Local development only. The password matches infra/local/docker-compose.yml.
+"vd_admin" "vd_local_password"
