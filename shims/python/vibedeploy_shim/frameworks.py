@@ -1,106 +1,63 @@
-"""Install the middleware without the app asking. Readme.md section 14.
+"""Installs the middleware without the app asking. Readme.md section 14.
 
-We patch the framework's constructor rather than the app's own code because we
-never see the app's code: the buildpack image is opaque to us and the builder
-is not expected to edit anything.
+Readme section 14 says to patch `Starlette.__init__`. That does not reach
+FastAPI: current FastAPI reimplements both `__init__` and
+`build_middleware_stack` and calls neither via `super()`, so an app built with
+`FastAPI()` would come out unprotected while still looking patched.
+
+Patching `build_middleware_stack` instead works for both, and catches apps that
+add their own middleware after construction, because the stack is rebuilt then.
 """
 
 from __future__ import annotations
 
-import functools
-from typing import Any
+import logging
 
-from . import identity as identity_module
-from .asgi import IdentityMiddleware
-from .identity import HEADER_NAME, verify
+from vibedeploy_shim.asgi import IdentityMiddleware
 
-_PATCHED = "_vibedeploy_patched"
+log = logging.getLogger("vibedeploy_shim")
 
 
-def _patch_build_middleware_stack(cls: Any) -> None:
-    """Wrap whatever the class builds, so we end up outermost.
+def _patch(cls) -> None:
+    original = getattr(cls, "build_middleware_stack", None)
+    if original is None or getattr(original, "__vd_patched__", False):
+        # Already patched, possibly via a base class we patched first.
+        return
 
-    Readme.md section 14 says to patch `Starlette.__init__`. That no longer
-    reaches FastAPI: current FastAPI versions neither call `Starlette.__init__`
-    nor `super().build_middleware_stack()`, they reimplement both. So we patch
-    `build_middleware_stack` on each class that defines it.
-
-    The guard keeps this to exactly one wrap on any framework where the
-    subclass does delegate to super().
-    """
-    original = cls.build_middleware_stack
-
-    @functools.wraps(original)
-    def build_middleware_stack(self: Any) -> Any:
+    def build_middleware_stack(self):
         stack = original(self)
+        # Idempotence: rebuilding the stack must not nest a second copy.
         if isinstance(stack, IdentityMiddleware):
             return stack
         return IdentityMiddleware(stack)
 
-    setattr(build_middleware_stack, _PATCHED, True)
+    build_middleware_stack.__vd_patched__ = True
     cls.build_middleware_stack = build_middleware_stack
 
 
-def _already_patched(cls: Any) -> bool:
-    return getattr(cls.__dict__.get("build_middleware_stack"), _PATCHED, False)
+def install_frameworks() -> str:
+    """Patch whatever is importable and report what was found."""
+    found = []
 
-
-def patch_starlette() -> str | None:
     try:
         from starlette.applications import Starlette
     except ImportError:
-        return None
-
-    if not _already_patched(Starlette):
-        _patch_build_middleware_stack(Starlette)
+        pass
+    else:
+        _patch(Starlette)
+        found.append("starlette")
 
     try:
-        from fastapi.applications import FastAPI
+        from fastapi import FastAPI
     except ImportError:
+        pass
+    else:
+        _patch(FastAPI)
+        found.append("fastapi")
+
+    # FastAPI is the more specific answer when both are present.
+    if "fastapi" in found:
+        return "fastapi"
+    if "starlette" in found:
         return "starlette"
-
-    if "build_middleware_stack" in FastAPI.__dict__ and not _already_patched(FastAPI):
-        _patch_build_middleware_stack(FastAPI)
-    return "fastapi"
-
-
-def _flask_before_request() -> None:
-    from flask import g, request
-
-    raw = request.headers.get(HEADER_NAME)
-    g._vibedeploy_token = identity_module.set_current(
-        verify(raw, identity_module.load_key())
-    )
-
-
-def _flask_teardown_request(_exception: BaseException | None) -> None:
-    from flask import g
-
-    token = g.pop("_vibedeploy_token", None)
-    if token is not None:
-        identity_module.reset_current(token)
-
-
-def patch_flask() -> str | None:
-    try:
-        import flask
-    except ImportError:
-        return None
-
-    if not getattr(flask.Flask, _PATCHED, False):
-        original = flask.Flask.__init__
-
-        @functools.wraps(original)
-        def __init__(self: Any, *args: Any, **kwargs: Any) -> None:
-            original(self, *args, **kwargs)
-            self.before_request(_flask_before_request)
-            self.teardown_request(_flask_teardown_request)
-
-        flask.Flask.__init__ = __init__
-        setattr(flask.Flask, _PATCHED, True)
-
-    return "flask"
-
-
-def patch_all() -> str | None:
-    return patch_starlette() or patch_flask()
+    return "unknown"

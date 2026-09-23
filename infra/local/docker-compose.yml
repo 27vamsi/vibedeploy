@@ -1,59 +1,74 @@
-name: vibedeploy-local
+# Local stack. Readme.md section 8 M1 and section 5.
+#
+# Ports are deliberately non-default so this never collides with a Postgres
+# already installed on the host:
+#   postgres  127.0.0.1:55432
+#   pgbouncer 127.0.0.1:56432   (transaction pooling)
+#
+# Everything binds to 127.0.0.1 only. These are local development credentials
+# and are meant to be in the repo; nothing here is ever used on AWS.
+
+name: vibedeploy
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16
     environment:
       POSTGRES_USER: vd_admin
       POSTGRES_PASSWORD: vd_local_password
       POSTGRES_DB: vibedeploy
-      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
-    command:
-      - postgres
-      - -c
-      - password_encryption=scram-sha-256
-      - -c
-      - max_connections=200
+      # Local only, and deliberate. Every app gets freshly created runtime and
+      # agent roles with random passwords, so a static PgBouncer userlist can
+      # never know them. Trust here keeps the pooler usable without weakening
+      # anything we actually prove: RLS is enforced regardless of how the
+      # connection authenticated. AWS uses real credentials.
+      POSTGRES_HOST_AUTH_METHOD: trust
     ports:
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vd_admin -d vibedeploy"]
       interval: 2s
       timeout: 3s
       retries: 30
+    command:
+      # The pooling proof needs many short-lived connections behind PgBouncer.
+      - postgres
+      - -c
+      - max_connections=200
 
-  # Transaction pooling is the whole point: it is what breaks session-level
-  # SET and forces us to use set_config(..., true) inside a transaction.
-  # M2's concurrency test runs through here.
   pgbouncer:
-    image: edoburu/pgbouncer:v1.23.1-p3
+    image: edoburu/pgbouncer:v1.23.1-p2
     depends_on:
       postgres:
         condition: service_healthy
+    ports:
+      - "127.0.0.1:56432:6432"
     volumes:
       - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
-    ports:
-      - "56432:6432"
     healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 6432"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U vd_admin"]
       interval: 2s
       timeout: 3s
       retries: 30
 
+  # Routes <app>.localhost to the per-app login gate. Not used until M6, so it
+  # is not started by default: bring it up explicitly with
+  #   docker compose -f infra/local/docker-compose.yml up -d caddy
   caddy:
-    image: caddy:2-alpine
+    image: caddy:2
+    profiles: ["gateway"]
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddydata:/data
-      - caddyconfig:/config
-    ports:
-      - "80:80"
-      - "443:443"
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
-  pgdata:
-  caddydata:
-  caddyconfig:
+  postgres_data:
+  caddy_data:
+  caddy_config:

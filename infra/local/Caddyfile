@@ -1,13 +1,15 @@
+# Local routing for the login gate. Readme.md section 8 M6.
+#
+# Each deployed app is reachable at <app>.localhost and must only ever be
+# reachable through its sidecar, never directly. The sidecar listens on 8080
+# and is the only thing this file is allowed to point at.
+#
+# Not wired to real apps yet; M6 fills in the per-app upstreams.
+
 {
-	# Browsers resolve *.localhost to 127.0.0.1, and Caddy issues its own
-	# cert from an internal CA, so apps get real https locally.
-	local_certs
-	admin 0.0.0.0:2019
+	auto_https off
 }
 
-# M6 rewrites this block to route <app>.localhost to each app's sidecar.
-# Until then it only proves TLS and routing work.
-*.localhost {
-	tls internal
-	respond "vibedeploy local: no app mounted at {host}" 404
+:80 {
+	respond "vibedeploy: no app matched this hostname" 404
 }

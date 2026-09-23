@@ -1,51 +1,67 @@
-"""vibedeploy identity shim for Python. Readme.md section 14.
+"""vibedeploy identity shim. Readme.md section 14.
 
-One startup line is printed on install. The worker reads it out of the app's
-logs: if it is missing, or says a part is not active, the app is marked
-Unprotected. We never claim protection we did not confirm.
+The app never imports this. It is delivered as an extra image layer with a
+`sitecustomize.py` on PYTHONPATH, so it installs itself before the app's own
+code runs.
+
+The startup line is a contract: the worker greps for it, and an app that does
+not print it is marked Unprotected and its deploy is blocked when protection
+was expected.
 """
 
 from __future__ import annotations
 
-import sys
+import logging
 
-from . import db, frameworks, identity
-from .identity import Identity, current
+from vibedeploy_shim.identity import (
+    Identity,
+    current_identity,
+    sign_identity,
+    verify_identity,
+)
 
-__all__ = ["Identity", "current", "install", "status_line"]
+__all__ = [
+    "Identity",
+    "current_identity",
+    "install",
+    "sign_identity",
+    "verify_identity",
+]
 
-STATUS_PREFIX = "vibedeploy-shim"
+log = logging.getLogger("vibedeploy_shim")
 
-_status: str | None = None
-
-
-def status_line(*, framework: str | None, db_lib: str | None, key: bool) -> str:
-    parts = [
-        STATUS_PREFIX,
-        "active" if (framework and db_lib and key) else "inactive",
-        "lang=python",
-        f"db={db_lib or 'none'}",
-        f"framework={framework or 'none'}",
-    ]
-    if not key:
-        parts.append("reason=no-identity-key")
-    elif not db_lib:
-        parts.append("reason=unsupported-database-library")
-    elif not framework:
-        parts.append("reason=unsupported-framework")
-    return " ".join(parts)
+_installed = False
 
 
-def install() -> str:
-    """Idempotent. Returns the startup line it printed."""
-    global _status
-    if _status is not None:
-        return _status
+def _detect_db() -> str:
+    try:
+        import sqlalchemy  # noqa: F401
+    except ImportError:
+        return "unknown"
+    return "sqlalchemy"
 
-    framework = frameworks.patch_all()
-    db_lib = "sqlalchemy" if db.install() else None
-    key = identity.load_key() is not None
 
-    _status = status_line(framework=framework, db_lib=db_lib, key=key)
-    print(_status, file=sys.stdout, flush=True)
-    return _status
+def install() -> None:
+    """Idempotent: importing twice, or a sitecustomize that runs again under a
+    reloader, must not stack two middlewares or two DB hooks."""
+    global _installed
+    if _installed:
+        return
+
+    db = _detect_db()
+    if db == "sqlalchemy":
+        from vibedeploy_shim.db import install_db_hook
+
+        install_db_hook()
+
+    from vibedeploy_shim.frameworks import install_frameworks
+
+    framework = install_frameworks()
+    _installed = True
+
+    # Printed, not just logged: the app may configure logging however it likes,
+    # and the worker has to be able to see this.
+    print(
+        f"vibedeploy-shim active lang=python db={db} framework={framework}",
+        flush=True,
+    )

@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(update-config)",
+      "Bash(python -m venv .venv)",
+      "Bash(.venv/Scripts/python.exe -m pip install -q -e \".[dev]\")",
+      "Bash(.venv/Scripts/python.exe -m pytest --version)",
+      "Bash(docker compose:*)"
+    ]
+  }
+}

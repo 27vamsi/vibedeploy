@@ -1,48 +1,53 @@
-"""Pure ASGI middleware that pins the identity to one request. Readme.md 14.
+"""Reads the identity header once per request. Readme.md section 14.1.
 
-Pure ASGI rather than Starlette's BaseHTTPMiddleware on purpose: BaseHTTPMiddleware
-runs the downstream app in a separate task, which would give it a copy of the
-context and put the identity out of reach of code that resets it.
+The sidecar has already stripped any client-supplied copy of the header and
+signed its own, so whatever arrives here either verifies against the per-app key
+or is discarded.
 """
 
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable, MutableMapping
+import logging
+import os
 
-from . import identity as identity_module
-from .identity import HEADER_NAME_BYTES, verify
+from vibedeploy_shim.identity import (
+    HEADER_NAME,
+    reset_current_identity,
+    set_current_identity,
+    verify_identity,
+)
 
-Scope = MutableMapping[str, Any]
-Receive = Callable[[], Awaitable[MutableMapping[str, Any]]]
-Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
+log = logging.getLogger("vibedeploy_shim")
+
+
+def _key() -> bytes:
+    return os.environ.get("VD_IDENTITY_KEY", "").encode()
 
 
 class IdentityMiddleware:
-    def __init__(self, app: Any, key: bytes | None = None) -> None:
+    """Pure ASGI, so it works under Starlette, FastAPI or anything else."""
+
+    def __init__(self, app):
         self.app = app
-        self._key = key
 
-    @property
-    def key(self) -> bytes | None:
-        # Read lazily: the secret is in the environment before the app starts,
-        # but importing the shim may happen earlier still.
-        if self._key is None:
-            self._key = identity_module.load_key()
-        return self._key
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] not in ("http", "websocket"):
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
         raw = None
-        for name, value in scope.get("headers", ()):
-            if name.lower() == HEADER_NAME_BYTES:
-                raw = value
+        for name, value in scope.get("headers", []):
+            if name.decode("latin-1").lower() == HEADER_NAME:
+                raw = value.decode("latin-1")
                 break
 
-        token = identity_module.set_current(verify(raw, self.key))
+        identity = verify_identity(
+            raw, _key(), app_id=os.environ.get("VD_APP_ID") or None
+        )
+        token = set_current_identity(identity)
         try:
             await self.app(scope, receive, send)
         finally:
-            identity_module.reset_current(token)
+            # Unconditional: a request that raised must not leave its identity
+            # behind for whatever runs next on this task.
+            reset_current_identity(token)

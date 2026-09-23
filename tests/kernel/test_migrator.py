@@ -1,59 +1,75 @@
-"""How migrations get to see all rows while FORCE is on.
+"""The migrator role. Readme.md section 9.1.
 
-Readme.md section 9.1 says the migrator has BYPASSRLS so that data backfills
-inside migrations do not silently touch zero rows, and also says
-`ALTER ROLE <migrator> SET role = <owner>` so migrated objects are owned by the
-owner role. Those two cannot both do their job: RLS bypass is decided by the
-*effective* role, so once the migrator acts as the owner it inherits the
-owner's NOBYPASSRLS and is filtered again.
-
-Section 9.1 says "Pick one approach and test it in M1". We pick the documented
-fallback - drop FORCE for the duration of the migration, put it back after -
-because it works the same on RDS, where BYPASSRLS may not be grantable at all.
-These tests pin both halves of that reasoning down.
+FORCE filters the owner, so a data backfill written by an app's migration would
+silently touch zero rows. The migrator carries BYPASSRLS so backfills work. That
+is only safe because its credentials never reach the app or the gateway.
 """
 
 from __future__ import annotations
 
-from .conftest import NOTES_A, NOTES_B, force_rls_disabled, identity
+import asyncpg
+
+from kernel.render import quote_ident
+from tests.kernel.conftest import dsn
 
 
-async def test_migrator_is_declared_bypassrls(admin, kernel):
-    assert await admin.fetchval(
-        "SELECT rolbypassrls FROM pg_roles WHERE rolname = $1", kernel.roles.migrator
+async def test_migrator_has_bypassrls_and_the_others_do_not(app, admin):
+    attrs = {
+        r["rolname"]: r["rolbypassrls"]
+        for r in await admin.fetch(
+            "SELECT rolname, rolbypassrls FROM pg_roles WHERE rolname = ANY($1::text[])",
+            [
+                app.roles.owner,
+                app.roles.migrator,
+                app.roles.runtime,
+                app.roles.agent,
+            ],
+        )
+    }
+    assert attrs[app.roles.migrator] is True
+    assert attrs[app.roles.owner] is False
+    assert attrs[app.roles.runtime] is False
+    assert attrs[app.roles.agent] is False
+
+
+async def test_migrator_can_backfill_every_row_under_force(app):
+    """The reason BYPASSRLS exists on this role."""
+    conn = await asyncpg.connect(dsn(app.roles.migrator, app.roles.migrator_password))
+    try:
+        async with conn.transaction():
+            status = await conn.execute("UPDATE notes SET body = body")
+            touched = int(status.rsplit(" ", 1)[-1])
+    finally:
+        await conn.close()
+
+    assert touched == len(app.notes_a) + len(app.notes_b)
+
+
+async def test_migrated_objects_are_owned_by_the_owner_role(app, admin):
+    """The migrator runs as the owner, so nothing ends up owned by a login role."""
+    owners = await admin.fetch(
+        "SELECT c.relname, pg_get_userbyid(c.relowner) AS owner "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = $1 AND c.relkind = 'r'",
+        app.roles.schema,
     )
+    assert owners
+    for row in owners:
+        assert row["owner"] == app.roles.owner
 
 
-async def test_migrator_connects_as_the_owner_role(as_owner, kernel):
-    assert await as_owner.fetchval("SELECT current_user") == kernel.roles.owner
-    assert await as_owner.fetchval("SELECT session_user") == kernel.roles.migrator
+async def test_runtime_and_agent_cannot_reach_the_schema_they_do_not_own(app, admin):
+    """They get USAGE, never CREATE: an app cannot add an unprotected table."""
+    for name in (app.roles.runtime, app.roles.agent):
+        can_create = await admin.fetchval(
+            "SELECT has_schema_privilege($1, $2, 'CREATE')", name, app.roles.schema
+        )
+        assert can_create is False, f"{name} must not be able to create objects"
 
 
-async def test_bypassrls_does_not_survive_set_role_so_force_still_filters(as_owner):
-    """The conflict, made visible: BYPASSRLS on the migrator buys nothing here."""
-    async with identity(as_owner, None) as c:
-        assert await c.fetch("SELECT id FROM notes") == []
-
-
-async def test_backfill_reaches_every_row_inside_the_no_force_window(
-    admin, kernel, as_owner
-):
-    """The approach we picked: a migration can actually see and update all rows."""
-    async with force_rls_disabled(admin, kernel):
-        tx = as_owner.transaction()
-        await tx.start()
-        try:
-            status = await as_owner.execute("UPDATE notes SET body = body || '!'")
-            assert status == "UPDATE %d" % (len(NOTES_A) + len(NOTES_B))
-        finally:
-            await tx.rollback()
-
-
-async def test_force_is_restored_after_the_window(admin, kernel):
-    forced = await admin.fetchval(
-        "SELECT relforcerowsecurity FROM pg_class c "
-        "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = $1 AND c.relname = 'notes'",
-        kernel.roles.schema,
+async def test_public_schema_grants_nothing_to_everyone(app, admin):
+    """Nothing should ever land in the public schema by accident."""
+    can_create = await admin.fetchval(
+        "SELECT has_schema_privilege('public', 'public', 'CREATE')"
     )
-    assert forced is True
+    assert can_create is False

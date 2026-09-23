@@ -1,91 +1,122 @@
-"""M2 acceptance: identity survives a transaction pooler. Readme.md section 8.
+"""The pooling proof. Readme.md section 8 M2.
 
-500 concurrent requests spread over 5 users, through PgBouncer in transaction
-mode, against an endpoint whose SQL has no WHERE clause. Every response must
-contain exactly the caller's rows.
+500 concurrent requests, 5 users, one connection pool, PgBouncer in transaction
+mode. Every response must contain exactly the requester's own rows, from an
+endpoint whose SQL has no WHERE clause.
 
-The negative test runs the identical load against the leaky app, and fails if
-no leak is found - that is what proves this test can fail.
+Never delete or skip anything in this file to make CI green (CLAUDE.md).
 """
 
 from __future__ import annotations
 
 import asyncio
-import uuid
+import time
 
 import httpx
 import pytest
 
-from .conftest import Fixture
+from vibedeploy_shim.identity import sign_identity
 
 REQUESTS = 500
+RUNS = 10
 
 
-async def _fire(server, fixture: Fixture) -> list[tuple[uuid.UUID, set[str]]]:
-    plan = [fixture.users[i % len(fixture.users)] for i in range(REQUESTS)]
-    limits = httpx.Limits(max_connections=50, max_keepalive_connections=50)
+def header_for(deployment, user_id) -> str:
+    now = int(time.time())
+    return sign_identity(
+        {
+            "v": 1,
+            "app": deployment.roles.app_id,
+            "sub": str(user_id),
+            "role": "member",
+            "iat": now,
+            "exp": now + 60,
+        },
+        deployment.identity_key.encode(),
+    )
+
+
+async def _hammer(deployment, base_url, count):
+    """Fire `count` requests concurrently, round-robin across the users."""
+    limits = httpx.Limits(max_connections=100, max_keepalive_connections=50)
     async with httpx.AsyncClient(
-        base_url=server.url, limits=limits, timeout=60
+        base_url=base_url, limits=limits, timeout=30
     ) as client:
-
-        async def one(user: uuid.UUID):
+        async def one(i):
+            user_id = deployment.users[i % len(deployment.users)]
             response = await client.get(
-                "/notes", headers={"X-VD-Identity": fixture.header(user)}
+                "/notes", headers={"X-VD-Identity": header_for(deployment, user_id)}
             )
             response.raise_for_status()
-            return user, set(response.json()["ids"])
+            return user_id, set(response.json()["ids"])
 
-        return await asyncio.gather(*(one(user) for user in plan))
-
-
-async def test_shim_keeps_every_response_to_its_own_user(app_server, pool_fixture):
-    server = app_server("shim")
-    for user, seen in await _fire(server, pool_fixture):
-        assert seen == pool_fixture.notes[user]
+        return await asyncio.gather(*(one(i) for i in range(count)))
 
 
-async def test_shim_reports_itself_active_on_startup(app_server):
-    server = app_server("shim")
-    assert (
-        "vibedeploy-shim active lang=python db=sqlalchemy framework=fastapi"
-        in server.logs()
+@pytest.mark.parametrize("run", range(RUNS))
+async def test_every_response_contains_only_its_own_rows(deployment, server, run):
+    """The headline claim, ten runs in a row."""
+    results = await _hammer(deployment, server.base_url, REQUESTS)
+    assert len(results) == REQUESTS
+
+    for user_id, got in results:
+        expected = deployment.notes[user_id]
+        assert got == expected, (
+            f"user {user_id} got {len(got)} ids, expected {len(expected)}; "
+            f"foreign ids: {sorted(got - expected)}"
+        )
+
+
+async def test_the_shim_installed_itself_in_the_app_process(server):
+    """The app never imports the shim; PYTHONPATH does it. Readme.md section 14."""
+    assert "vibedeploy-shim active" in server.output()
+    assert "db=sqlalchemy" in server.output()
+    assert "framework=fastapi" in server.output()
+
+
+async def test_a_request_with_no_identity_gets_nothing(deployment, server):
+    async with httpx.AsyncClient(base_url=server.base_url, timeout=30) as client:
+        response = await client.get("/notes")
+    response.raise_for_status()
+    assert response.json()["ids"] == []
+
+
+async def test_a_forged_identity_gets_nothing(deployment, server):
+    """Signed with the wrong key: the shim refuses it, so no identity is set."""
+    forged = sign_identity(
+        {
+            "v": 1,
+            "app": deployment.roles.app_id,
+            "sub": str(deployment.users[0]),
+            "role": "member",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 60,
+        },
+        b"not-the-right-key",
     )
-
-
-async def test_request_without_identity_sees_nothing(app_server):
-    server = app_server("shim")
-    async with httpx.AsyncClient(base_url=server.url, timeout=30) as client:
-        assert (await client.get("/notes")).json()["ids"] == []
-
-
-async def test_forged_identity_sees_nothing(app_server, pool_fixture):
-    """Wrong key, right shape. Fail closed, not fail open."""
-    from vibedeploy_shim.identity import make_header
-
-    forged = make_header(
-        app="app_pooltest",
-        sub=str(pool_fixture.users[0]),
-        role="member",
-        key=b"\x00" * 32,
-    )
-    server = app_server("shim")
-    async with httpx.AsyncClient(base_url=server.url, timeout=30) as client:
+    async with httpx.AsyncClient(base_url=server.base_url, timeout=30) as client:
         response = await client.get("/notes", headers={"X-VD-Identity": forged})
-        assert response.json()["ids"] == []
+    response.raise_for_status()
+    assert response.json()["ids"] == []
 
 
 @pytest.mark.negative
-async def test_the_test_can_fail(app_server, pool_fixture):
-    """Session-level identity under transaction pooling must be caught."""
-    server = app_server("leaky")
-    results = await _fire(server, pool_fixture)
+async def test_the_harness_can_actually_detect_a_leak(deployment, leaky_server):
+    """Negative control.
+
+    Same app, same pooler, but identity is set at session scope and committed.
+    PgBouncer then hands that server connection to another user's transaction.
+    If this ever stops leaking, the positive test above proves nothing and must
+    not be trusted.
+    """
+    results = await _hammer(deployment, leaky_server.base_url, REQUESTS)
 
     leaked = [
-        (user, seen - pool_fixture.notes[user])
-        for user, seen in results
-        if seen - pool_fixture.notes[user]
+        (user_id, got - deployment.notes[user_id])
+        for user_id, got in results
+        if got - deployment.notes[user_id]
     ]
     assert leaked, (
-        "the leaky app did not leak, so this suite cannot prove the shim is "
-        "what keeps responses separate"
+        "expected the session-scoped variant to leak across pooled connections; "
+        "if it no longer does, this test has stopped being a control"
     )

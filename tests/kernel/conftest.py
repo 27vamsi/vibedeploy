@@ -1,17 +1,19 @@
-"""Fixtures for the enforcement kernel proofs (Readme.md M1).
+"""Fixtures for the enforcement kernel tests. Readme.md section 8 M1.
 
-Everything here talks to the local Postgres from infra/local/docker-compose.yml.
-Start it with:  docker compose -f infra/local/docker-compose.yml up -d postgres
+One app is provisioned per session with the full four-role set, a two-table
+schema and a known seeding plan. Expected results come from that plan and never
+from reading the policies back (Readme.md section 3 rule 10).
 """
 
 from __future__ import annotations
 
 import os
+import secrets
 import uuid
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import asyncpg
+import pytest
 import pytest_asyncio
 
 from kernel.provision import (
@@ -21,178 +23,152 @@ from kernel.provision import (
     create_helpers,
     drop_app_roles,
     enable_rls,
-    grant_runtime,
-    set_force_rls,
+    grant_app_roles,
+    reassign_objects_to_owner,
 )
 
-ADMIN_DSN = os.environ.get(
-    "VD_TEST_DSN",
-    "postgresql://vd_admin:vd_local_password@127.0.0.1:55432/vibedeploy",
-)
-
-TEST_APP_ID = "app_kerneltest"
-
-# Ground truth. Section 12 rule 5: the answer key comes from the seeding plan,
-# never from reading the policies back.
-USER_A = uuid.UUID("aaaaaaaa-0000-4000-8000-000000000001")
-USER_B = uuid.UUID("bbbbbbbb-0000-4000-8000-000000000002")
-
-NOTES_A = [uuid.UUID("11111111-0000-4000-8000-00000000000%d" % i) for i in (1, 2)]
-NOTES_B = [uuid.UUID("22222222-0000-4000-8000-00000000000%d" % i) for i in (1, 2)]
+PG_HOST = os.environ.get("VD_PG_HOST", "127.0.0.1")
+PG_PORT = int(os.environ.get("VD_PG_PORT", "55432"))
+PG_DB = os.environ.get("VD_PG_DB", "vibedeploy")
+ADMIN_USER = os.environ.get("VD_PG_ADMIN_USER", "vd_admin")
+ADMIN_PASSWORD = os.environ.get("VD_PG_ADMIN_PASSWORD", "vd_local_password")
 
 
-def dsn_for(user: str, password: str) -> str:
-    host_and_db = ADMIN_DSN.split("@", 1)[1]
-    return f"postgresql://{user}:{password}@{host_and_db}"
-
-
-async def drop_probe_role(admin: asyncpg.Connection, name: str) -> None:
-    """DROP ROLE refuses while grants on the app's tables still reference it."""
-    if await admin.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", name):
-        await admin.execute(f'DROP OWNED BY "{name}" CASCADE')
-        await admin.execute(f'DROP ROLE "{name}"')
+def dsn(user: str, password: str) -> str:
+    return f"postgresql://{user}:{password}@{PG_HOST}:{PG_PORT}/{PG_DB}"
 
 
 @dataclass
-class KernelFixture:
+class App:
+    """A provisioned app plus the seeding plan that is the tests' answer key."""
+
     roles: AppRoles
-    bypass_user: str
-    bypass_password: str
+    user_a: uuid.UUID
+    user_b: uuid.UUID
+    notes_a: list[uuid.UUID] = field(default_factory=list)
+    notes_b: list[uuid.UUID] = field(default_factory=list)
 
-    @property
-    def runtime_dsn(self) -> str:
-        return dsn_for(self.roles.runtime, self.roles.runtime_password)
+    def notes_of(self, who: str) -> list[uuid.UUID]:
+        return self.notes_a if who == "a" else self.notes_b
 
-    @property
-    def migrator_dsn(self) -> str:
-        return dsn_for(self.roles.migrator, self.roles.migrator_password)
-
-    @property
-    def bypass_dsn(self) -> str:
-        return dsn_for(self.bypass_user, self.bypass_password)
+    def user_of(self, who: str) -> uuid.UUID:
+        return self.user_a if who == "a" else self.user_b
 
 
-@asynccontextmanager
-async def identity(conn: asyncpg.Connection, user_id, role: str = ""):
-    """What the shim does: transaction-local identity, bind parameters only.
+async def set_identity(
+    conn: asyncpg.Connection, user_id: uuid.UUID | None, role: str = ""
+) -> None:
+    """The only sanctioned way to set identity: transaction-local, bind params.
 
-    Rolled back at the end so checks never leave state behind (section 13).
+    Must be called inside an open transaction. Readme.md section 3 rule 4.
     """
-    tx = conn.transaction()
-    await tx.start()
-    try:
-        await conn.execute(
-            "SELECT set_config('app.user_id', $1, true), set_config('app.role', $2, true)",
-            "" if user_id is None else str(user_id),
-            role,
-        )
-        yield conn
-    finally:
-        await tx.rollback()
+    await conn.execute(
+        "SELECT set_config('app.user_id', $1, true), set_config('app.role', $2, true)",
+        "" if user_id is None else str(user_id),
+        role,
+    )
 
 
-@pytest_asyncio.fixture(scope="session", loop_scope="session")
+@pytest_asyncio.fixture(scope="session")
 async def admin():
-    conn = await asyncpg.connect(ADMIN_DSN)
+    conn = await asyncpg.connect(dsn(ADMIN_USER, ADMIN_PASSWORD))
     try:
         yield conn
     finally:
         await conn.close()
 
 
-@pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def kernel(admin: asyncpg.Connection) -> KernelFixture:
-    roles = AppRoles.generate(TEST_APP_ID)
-    bypass_user = f"{TEST_APP_ID}_bypass_probe"
-    bypass_password = "probe_password"
+@pytest_asyncio.fixture(scope="session")
+async def app(admin) -> App:
+    """Provision one app end to end, the same order the worker uses.
 
-    await drop_probe_role(admin, bypass_user)
+    Readme.md section 9.1: RLS and FORCE first, then policies, then grants.
+    """
+    roles = AppRoles.generate(f"app_t{secrets.token_hex(4)}")
     await drop_app_roles(admin, roles)
-
     await create_app_roles(admin, roles)
     await create_helpers(admin, roles, key_type="uuid")
 
-    # Migrations run as the migrator, which acts as the owner role.
-    migrator = await asyncpg.connect(dsn_for(roles.migrator, roles.migrator_password))
+    built = App(roles=roles, user_a=uuid.uuid4(), user_b=uuid.uuid4())
+
+    # Schema and seed data go in as the migrator, which is how a real app's
+    # migrations run.
+    mig = await asyncpg.connect(dsn(roles.migrator, roles.migrator_password))
     try:
-        await migrator.execute(
+        await mig.execute(
             """
+            CREATE TABLE users (
+                id    uuid PRIMARY KEY,
+                email text NOT NULL UNIQUE
+            );
             CREATE TABLE notes (
                 id       uuid PRIMARY KEY,
-                owner_id uuid NOT NULL,
+                owner_id uuid NOT NULL REFERENCES users(id),
                 body     text NOT NULL
             );
+            CREATE INDEX ON notes (owner_id);
             """
         )
-        rows = [(n, USER_A, "a note") for n in NOTES_A] + [
-            (n, USER_B, "b note") for n in NOTES_B
-        ]
-        await migrator.executemany(
-            "INSERT INTO notes (id, owner_id, body) VALUES ($1, $2, $3)", rows
-        )
+        for who, user_id in (("a", built.user_a), ("b", built.user_b)):
+            await mig.execute(
+                "INSERT INTO users (id, email) VALUES ($1, $2)",
+                user_id,
+                f"{who}@example.com",
+            )
+            for n in range(2):
+                note_id = uuid.uuid4()
+                await mig.execute(
+                    "INSERT INTO notes (id, owner_id, body) VALUES ($1, $2, $3)",
+                    note_id,
+                    user_id,
+                    f"note {n} owned by {who}",
+                )
+                built.notes_of(who).append(note_id)
     finally:
-        await migrator.close()
+        await mig.close()
 
-    # Section 9.1 order: rules first, grants last.
-    await enable_rls(admin, roles, ["notes"])
+    tables = ["users", "notes"]
+    await reassign_objects_to_owner(admin, roles)
+    await enable_rls(admin, roles, tables)
     await apply_owner_column_policy(
-        admin, roles, table="notes", column="owner_id", admin_enabled=False
+        admin, roles, table="users", column="id", admin_enabled=True
     )
-    await grant_runtime(admin, roles, ["notes"])
+    await apply_owner_column_policy(
+        admin, roles, table="notes", column="owner_id", admin_enabled=True
+    )
+    await grant_app_roles(admin, roles, tables)
 
-    # A deliberately over-privileged role, used only to prove that
-    # NOBYPASSRLS on the runtime role is what does the work.
-    await admin.execute(
-        f"""CREATE ROLE "{bypass_user}" LOGIN PASSWORD '{bypass_password}' BYPASSRLS"""
-    )
-    await admin.execute(f'GRANT USAGE ON SCHEMA "{roles.schema}" TO "{bypass_user}"')
-    await admin.execute(
-        f'GRANT SELECT ON "{roles.schema}"."notes" TO "{bypass_user}"'
-    )
-    await admin.execute(
-        f'ALTER ROLE "{bypass_user}" SET search_path = "{roles.schema}"'
-    )
-
-    fixture = KernelFixture(roles, bypass_user, bypass_password)
     try:
-        yield fixture
+        yield built
     finally:
-        await drop_probe_role(admin, bypass_user)
         await drop_app_roles(admin, roles)
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def runtime(kernel: KernelFixture):
-    conn = await asyncpg.connect(kernel.runtime_dsn)
+@pytest_asyncio.fixture(scope="session")
+async def runtime_conn(app):
+    conn = await asyncpg.connect(
+        dsn(app.roles.runtime, app.roles.runtime_password)
+    )
     try:
         yield conn
     finally:
         await conn.close()
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def as_owner(kernel: KernelFixture):
-    """Connects as the migrator, which ALTER ROLE ... SET role makes the owner."""
-    conn = await asyncpg.connect(kernel.migrator_dsn)
+@pytest_asyncio.fixture(scope="session")
+async def agent_conn(app):
+    conn = await asyncpg.connect(dsn(app.roles.agent, app.roles.agent_password))
     try:
         yield conn
     finally:
         await conn.close()
 
 
-@pytest_asyncio.fixture(loop_scope="session")
-async def bypass(kernel: KernelFixture):
-    conn = await asyncpg.connect(kernel.bypass_dsn)
-    try:
-        yield conn
-    finally:
-        await conn.close()
+@pytest.fixture(params=["runtime", "agent"])
+def app_conn(request):
+    """Every access test runs twice: once as the app, once as the gateway.
 
-
-@asynccontextmanager
-async def force_rls_disabled(admin: asyncpg.Connection, kernel: KernelFixture):
-    await set_force_rls(admin, kernel.roles, ["notes"], force=False)
-    try:
-        yield
-    finally:
-        await set_force_rls(admin, kernel.roles, ["notes"], force=True)
+    Readme.md section 13: the agent role must produce identical results to the
+    runtime role. That is what proves an agent cannot exceed its person.
+    """
+    return request.getfixturevalue(f"{request.param}_conn")

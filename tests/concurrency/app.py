@@ -1,74 +1,76 @@
-"""The sloppy app the M2 proof runs against. Readme.md section 8, M2.
+"""A deliberately sloppy app. This is the thing under test, not a helper.
 
-`/notes` is deliberately unfiltered - `SELECT id FROM notes`, no WHERE. If the
-responses still contain only the caller's rows, that is the database doing it.
+It does everything wrong on purpose:
+  - the endpoint selects from `notes` with no WHERE clause at all
+  - it never imports the shim, never mentions identity, never filters anything
 
-Two modes, chosen by VD_APP_MODE:
+If a user still only sees their own rows, that is the database doing it. That is
+the entire claim of the product.
 
-  shim    nothing in this file touches identity. `sitecustomize.py` is on
-          PYTHONPATH, so the shim patched Starlette and SQLAlchemy before this
-          module was imported, and every transaction opens with a
-          transaction-local `set_config(..., true)`.
-
-  leaky   the negative control. Identity is set session-level
-          (`set_config(..., false)`) and committed, then the query runs in the
-          next transaction - the "set it once for the connection" shortcut.
-          Under transaction pooling that next transaction can land on a
-          different server connection, so the query reads whatever identity
-          some other request left behind. The suite must catch that.
+Set VD_TEST_LEAK=1 to get the broken variant used as the negative control: it
+sets identity at *session* scope and commits, which is the classic mistake that
+a transaction-mode pooler turns into a cross-user data leak.
 """
 
 from __future__ import annotations
 
+import base64
+import json
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
-MODE = os.environ.get("VD_APP_MODE", "shim")
+DSN = os.environ["VD_TEST_DSN"]
+LEAK = os.environ.get("VD_TEST_LEAK") == "1"
 
 engine = create_async_engine(
-    os.environ["VD_APP_DATABASE_URL"],
-    pool_size=10,
-    max_overflow=0,
-    # PgBouncer in transaction mode cannot carry server-side prepared
-    # statements across transactions, so both caches have to be off.
+    DSN,
+    # Both are required behind PgBouncer in transaction mode: asyncpg would
+    # otherwise prepare statements on a server connection it does not keep.
     connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0},
+    pool_size=10,
+    max_overflow=10,
 )
-Session = async_sessionmaker(engine, expire_on_commit=False)
 
 app = FastAPI()
 
-SET_SESSION_IDENTITY = text(
-    "SELECT set_config('app.user_id', :vd_user_id, false), "
-    "set_config('app.role', :vd_role, false)"
-)
+UNFILTERED = text("SELECT id FROM notes")
 
 
-async def _set_session_identity(session) -> None:
-    from vibedeploy_shim.identity import current
+@app.get("/health")
+async def health():
+    return {"ok": True}
 
-    who = current()
-    await session.execute(
-        SET_SESSION_IDENTITY,
-        {"vd_user_id": who.sub if who else "", "vd_role": who.role if who else ""},
-    )
-    # Without the commit the session-level setting would roll back with the
-    # transaction and the mistake would be invisible.
-    await session.commit()
+
+def _unverified_sub(request: Request) -> str:
+    """Only the leaky variant does this. A real app never parses the header."""
+    raw = request.headers.get("x-vd-identity", "")
+    part = raw.partition(".")[0]
+    if not part:
+        return ""
+    padded = part + "=" * (-len(part) % 4)
+    try:
+        return json.loads(base64.urlsafe_b64decode(padded)).get("sub", "")
+    except Exception:
+        return ""
 
 
 @app.get("/notes")
-async def notes() -> dict[str, list[str]]:
-    async with Session() as session:
-        if MODE == "leaky":
-            await _set_session_identity(session)
-        rows = await session.execute(text("SELECT id FROM notes"))
-        return {"ids": [str(row[0]) for row in rows]}
+async def notes(request: Request):
+    if LEAK:
+        # Session scope plus a commit: the setting outlives the transaction and
+        # rides along with whichever pooled server connection happens to carry
+        # it next.
+        async with engine.connect() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.user_id', :u, false)"),
+                {"u": _unverified_sub(request)},
+            )
+            await conn.commit()
 
+    async with engine.begin() as conn:
+        rows = (await conn.execute(UNFILTERED)).fetchall()
 
-if MODE == "leaky":
-    from vibedeploy_shim.asgi import IdentityMiddleware
-
-    app.add_middleware(IdentityMiddleware)
+    return {"ids": [str(r[0]) for r in rows]}

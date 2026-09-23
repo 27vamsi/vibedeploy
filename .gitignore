@@ -5,5 +5,3 @@ __pycache__/
 .venv/
 
 node_modules/
-# Prisma generates its client into node_modules; nothing generated is checked in.
-tests/concurrency/node/prisma/generated/

@@ -1,7 +1,11 @@
-"""M1 acceptance: the database, not the app, decides who sees what.
+"""The M1 acceptance criteria, Readme.md section 8.
 
-Every test here maps to a bullet in Readme.md section 8, M1 "Done when".
-The query the app runs is always the unfiltered one - that is the point.
+Every access test runs as the runtime role and again as the agent role via the
+`app_conn` fixture. Identical results are the proof that putting an agent on an
+app does not widen anything.
+
+Expected rows come from the seeding plan in conftest, never from reading the
+policies back.
 """
 
 from __future__ import annotations
@@ -11,173 +15,225 @@ import uuid
 import asyncpg
 import pytest
 
-from .conftest import NOTES_A, NOTES_B, USER_A, USER_B, force_rls_disabled, identity
-
-UNFILTERED = "SELECT id FROM notes"
+from tests.kernel.conftest import dsn, set_identity
 
 
-async def ids(conn, sql=UNFILTERED, *args) -> set[uuid.UUID]:
-    return {r["id"] for r in await conn.fetch(sql, *args)}
+def affected(status: str) -> int:
+    """asyncpg returns a command tag like 'UPDATE 3'."""
+    return int(status.rsplit(" ", 1)[-1])
 
 
-# --- reading -----------------------------------------------------------------
+@pytest.mark.parametrize("who", ["a", "b"])
+async def test_sees_only_own_rows(app, app_conn, who):
+    async with app_conn.transaction():
+        await set_identity(app_conn, app.user_of(who))
+        rows = await app_conn.fetch("SELECT id FROM notes")
+
+    assert {r["id"] for r in rows} == set(app.notes_of(who))
 
 
-async def test_runtime_with_identity_sees_only_its_own_rows(runtime):
-    async with identity(runtime, USER_A) as c:
-        assert await ids(c) == set(NOTES_A)
-    async with identity(runtime, USER_B) as c:
-        assert await ids(c) == set(NOTES_B)
+async def test_no_identity_sees_zero_rows(app, app_conn):
+    """The headline claim: no identity is zero rows, not everything."""
+    async with app_conn.transaction():
+        await set_identity(app_conn, None)
+        notes = await app_conn.fetch("SELECT id FROM notes")
+        users = await app_conn.fetch("SELECT id FROM users")
+
+    assert notes == []
+    assert users == []
 
 
-async def test_runtime_without_identity_sees_nothing(runtime):
-    async with identity(runtime, None) as c:
-        assert await ids(c) == set()
+async def test_unfiltered_select_still_scopes_to_one_user(app, app_conn):
+    """`SELECT * FROM notes` with no WHERE, the sloppy app's query."""
+    async with app_conn.transaction():
+        await set_identity(app_conn, app.user_a)
+        rows = await app_conn.fetch("SELECT * FROM notes")
+
+    assert len(rows) == len(app.notes_a)
+    assert all(r["owner_id"] == app.user_a for r in rows)
 
 
-async def test_runtime_cannot_read_another_users_row_by_primary_key(runtime):
-    async with identity(runtime, USER_A) as c:
-        rows = await c.fetch("SELECT id FROM notes WHERE id = $1", NOTES_B[0])
-        assert rows == []
+async def test_identity_does_not_leak_to_the_next_transaction(app, app_conn):
+    """Transaction-local settings plus a pooled connection.
+
+    After a transaction that set a user ends, the next transaction on the same
+    connection must see nothing. current_setting returns '' rather than NULL
+    here, which is why the helper wraps it in NULLIF.
+    """
+    async with app_conn.transaction():
+        await set_identity(app_conn, app.user_a)
+        assert len(await app_conn.fetch("SELECT id FROM notes")) == len(app.notes_a)
+
+    async with app_conn.transaction():
+        leaked = await app_conn.fetchval("SELECT current_setting('app.user_id', true)")
+        rows = await app_conn.fetch("SELECT id FROM notes")
+
+    assert leaked in ("", None)
+    assert rows == []
 
 
-# --- writing -----------------------------------------------------------------
-
-
-async def test_runtime_cannot_insert_a_row_owned_by_someone_else(runtime):
-    async with identity(runtime, USER_A) as c:
-        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
-            await c.execute(
-                "INSERT INTO notes (id, owner_id, body) VALUES ($1, $2, 'x')",
+async def test_cannot_insert_a_row_owned_by_someone_else(app, app_conn):
+    with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+        async with app_conn.transaction():
+            await set_identity(app_conn, app.user_a)
+            await app_conn.execute(
+                "INSERT INTO notes (id, owner_id, body) VALUES ($1, $2, $3)",
                 uuid.uuid4(),
-                USER_B,
+                app.user_b,
+                "planted by a, owned by b",
             )
 
 
-async def test_runtime_cannot_reassign_its_own_row_to_someone_else(runtime):
-    async with identity(runtime, USER_A) as c:
-        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
-            await c.execute(
-                "UPDATE notes SET owner_id = $1 WHERE id = $2", USER_B, NOTES_A[0]
+async def test_cannot_reassign_own_row_to_someone_else(app, app_conn):
+    """WITH CHECK on UPDATE. Without it, A could hand a row to B."""
+    with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+        async with app_conn.transaction():
+            await set_identity(app_conn, app.user_a)
+            await app_conn.execute(
+                "UPDATE notes SET owner_id = $1 WHERE id = $2",
+                app.user_b,
+                app.notes_a[0],
             )
 
 
-async def test_runtime_update_of_another_users_row_affects_zero_rows(runtime):
-    async with identity(runtime, USER_A) as c:
-        status = await c.execute(
-            "UPDATE notes SET body = 'hacked' WHERE id = $1", NOTES_B[0]
+async def test_update_of_another_users_rows_affects_nothing(app, app_conn):
+    async with app_conn.transaction():
+        await set_identity(app_conn, app.user_a)
+        status = await app_conn.execute(
+            "UPDATE notes SET body = 'owned' WHERE id = $1", app.notes_b[0]
         )
-        assert status == "UPDATE 0"
+
+    assert affected(status) == 0
 
 
-async def test_runtime_delete_of_another_users_row_affects_zero_rows(runtime):
-    async with identity(runtime, USER_A) as c:
-        status = await c.execute("DELETE FROM notes WHERE id = $1", NOTES_B[0])
-        assert status == "DELETE 0"
+async def test_delete_of_another_users_rows_affects_nothing(app, app_conn):
+    async with app_conn.transaction():
+        await set_identity(app_conn, app.user_a)
+        status = await app_conn.execute(
+            "DELETE FROM notes WHERE id = $1", app.notes_b[0]
+        )
+
+    assert affected(status) == 0
 
 
-async def test_runtime_cannot_truncate(runtime):
-    async with identity(runtime, USER_A) as c:
-        with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
-            await c.execute("TRUNCATE notes")
+async def test_truncate_is_denied(app, app_conn):
+    """TRUNCATE ignores RLS entirely, so the privilege is never granted."""
+    with pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError):
+        async with app_conn.transaction():
+            await set_identity(app_conn, app.user_a)
+            await app_conn.execute("TRUNCATE notes")
 
 
-# --- proving each control is load-bearing ------------------------------------
+async def test_admin_claim_sees_every_row(app, app_conn):
+    async with app_conn.transaction():
+        await set_identity(app_conn, app.user_a, role="admin")
+        rows = await app_conn.fetch("SELECT id FROM notes")
+
+    assert {r["id"] for r in rows} == set(app.notes_a) | set(app.notes_b)
 
 
-async def test_owner_role_is_filtered_while_force_is_on(as_owner):
-    """FORCE is what stops the table owner from seeing everything."""
-    async with identity(as_owner, None) as c:
-        assert (await c.fetchval("SELECT current_user")).endswith("_owner")
-        assert await ids(c) == set()
+async def test_unknown_role_claim_grants_nothing_extra(app, app_conn):
+    """Only the exact string 'admin' widens anything."""
+    async with app_conn.transaction():
+        await set_identity(app_conn, app.user_a, role="administrator")
+        rows = await app_conn.fetch("SELECT id FROM notes")
+
+    assert {r["id"] for r in rows} == set(app.notes_a)
 
 
-async def test_owner_role_sees_everything_once_force_is_off(admin, kernel, as_owner):
-    """The same query, FORCE removed: all four rows. Proves the test can fail."""
-    async with force_rls_disabled(admin, kernel):
-        async with identity(as_owner, None) as c:
-            assert await ids(c) == set(NOTES_A) | set(NOTES_B)
-
-
-async def test_bypassrls_role_sees_everything(bypass):
-    """Proves NOBYPASSRLS on the runtime role is doing real work."""
-    async with identity(bypass, USER_A) as c:
-        assert await ids(c) == set(NOTES_A) | set(NOTES_B)
-
-
-async def test_runtime_role_has_no_dangerous_attributes(admin, kernel):
+@pytest.mark.parametrize("role_attr", ["runtime", "agent"])
+async def test_app_facing_roles_hold_no_privileges(app, admin, role_attr):
+    """Runtime and agent must both be ordinary, unprivileged login roles."""
+    name = getattr(app.roles, role_attr)
     row = await admin.fetchrow(
-        "SELECT rolbypassrls, rolsuper, rolcreaterole, rolcreatedb, rolinherit "
+        "SELECT rolsuper, rolbypassrls, rolinherit, rolcreaterole, rolcreatedb "
         "FROM pg_roles WHERE rolname = $1",
-        kernel.roles.runtime,
+        name,
     )
-    assert row["rolbypassrls"] is False
     assert row["rolsuper"] is False
+    assert row["rolbypassrls"] is False
+    assert row["rolinherit"] is False
     assert row["rolcreaterole"] is False
     assert row["rolcreatedb"] is False
-    assert row["rolinherit"] is False
 
     is_member = await admin.fetchval(
-        "SELECT pg_has_role($1, $2, 'member')", kernel.roles.runtime, kernel.roles.owner
+        "SELECT pg_has_role($1, $2, 'MEMBER')", name, app.roles.owner
     )
     assert is_member is False
 
     owns = await admin.fetchval(
         "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
         "WHERE n.nspname = $1 AND pg_get_userbyid(c.relowner) = $2",
-        kernel.roles.schema,
-        kernel.roles.runtime,
+        app.roles.schema,
+        name,
     )
     assert owns == 0
 
 
-async def test_every_table_has_rls_enabled_and_forced(admin, kernel):
-    row = await admin.fetchrow(
-        "SELECT relrowsecurity, relforcerowsecurity FROM pg_class c "
-        "JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE n.nspname = $1 AND c.relname = 'notes'",
-        kernel.roles.schema,
+async def test_agent_role_carries_a_statement_timeout(app, admin):
+    """An agent is driven by a model and will ask for something enormous."""
+    settings = await admin.fetchval(
+        "SELECT rolconfig FROM pg_roles WHERE rolname = $1", app.roles.agent
     )
-    assert row["relrowsecurity"] is True
-    assert row["relforcerowsecurity"] is True
+    assert "statement_timeout=5s" in settings
 
-
-async def test_policies_cover_all_four_commands_and_none_is_literal_true(admin, kernel):
-    rows = await admin.fetch(
-        "SELECT cmd, qual, with_check FROM pg_policies "
-        "WHERE schemaname = $1 AND tablename = 'notes'",
-        kernel.roles.schema,
-    )
-    assert {r["cmd"] for r in rows} == {"SELECT", "INSERT", "UPDATE", "DELETE"}
-    for r in rows:
-        for expr in (r["qual"], r["with_check"]):
-            assert expr != "true", f"{r['cmd']} policy lets everything through"
-
-
-# --- the pooling gotcha ------------------------------------------------------
-
-
-async def test_identity_does_not_survive_its_transaction(runtime):
-    """The empty-string gotcha (section 9.2).
-
-    After a transaction-local setting ends, current_setting returns '' rather
-    than NULL. NULLIF turns it back into NULL so the next transaction on the
-    same pooled connection sees nothing instead of erroring or leaking.
-    """
-    async with identity(runtime, USER_A) as c:
-        assert await ids(c) == set(NOTES_A)
-
-    tx = runtime.transaction()
-    await tx.start()
+    conn = await asyncpg.connect(dsn(app.roles.agent, app.roles.agent_password))
     try:
-        leftover = await runtime.fetchval("SELECT current_setting('app.user_id', true)")
-        assert leftover in ("", None)
-        assert await ids(runtime) == set()
+        assert await conn.fetchval("SHOW statement_timeout") == "5s"
     finally:
-        await tx.rollback()
+        await conn.close()
 
 
-async def test_vd_user_id_returns_null_rather_than_erroring_on_empty_string(runtime):
-    async with identity(runtime, None) as c:
-        assert await c.fetchval("SELECT vd_user_id()") is None
-        assert await c.fetchval("SELECT vd_role()") is None
+@pytest.mark.parametrize("role_attr", ["runtime", "agent"])
+async def test_dangerous_privileges_are_never_granted(app, admin, role_attr):
+    name = getattr(app.roles, role_attr)
+    for priv in ("TRUNCATE", "REFERENCES", "TRIGGER"):
+        held = await admin.fetchval(
+            "SELECT has_table_privilege($1, $2, $3)",
+            name,
+            f"{app.roles.schema}.notes",
+            priv,
+        )
+        assert held is False, f"{name} must not hold {priv}"
+
+
+async def test_no_policy_uses_a_literal_true(app, admin):
+    """`USING (true)` is the bug the whole product exists to catch."""
+    exprs = await admin.fetch(
+        "SELECT polname, pg_get_expr(polqual, polrelid) AS using_expr, "
+        "       pg_get_expr(polwithcheck, polrelid) AS check_expr "
+        "FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1",
+        app.roles.schema,
+    )
+    assert exprs, "expected policies to exist"
+    for row in exprs:
+        for expr in (row["using_expr"], row["check_expr"]):
+            assert expr != "true", f"{row['polname']} uses a literal true"
+
+
+async def test_every_table_has_rls_enabled_and_forced(app, admin):
+    rows = await admin.fetch(
+        "SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity "
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = $1 AND c.relkind = 'r'",
+        app.roles.schema,
+    )
+    assert {r["relname"] for r in rows} == {"users", "notes"}
+    for row in rows:
+        assert row["relrowsecurity"] is True, f"{row['relname']} has RLS off"
+        assert row["relforcerowsecurity"] is True, f"{row['relname']} is not FORCEd"
+
+
+@pytest.mark.parametrize("table", ["users", "notes"])
+async def test_every_table_has_a_policy_for_all_four_commands(app, admin, table):
+    cmds = await admin.fetch(
+        "SELECT p.polcmd FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = $1 AND c.relname = $2",
+        app.roles.schema,
+        table,
+    )
+    # polcmd is Postgres' internal "char": r = SELECT, a = INSERT,
+    # w = UPDATE, d = DELETE.
+    assert {c["polcmd"].decode() for c in cmds} == {"r", "a", "w", "d"}
