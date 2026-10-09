@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block title %}Evidence &middot; {{ app.name }}{% endblock %}
+{% block body %}
+<p class="muted"><a href="/apps/{{ app.app_id }}">{{ app.name }}</a> &rsaquo; evidence</p>
+<h1>Evidence report</h1>
+<p class="muted">Counted from the audit log and from nothing else, so the report
+  says what was recorded rather than what the records were later edited to.</p>
+
+<form method="get" action="/apps/{{ app.app_id }}/evidence">
+  <label>From <input name="since" value="{{ since }}" placeholder="2026-10-01"></label>
+  <label>To <input name="until" value="{{ until }}" placeholder="2026-10-31"></label>
+  <button type="submit">Show</button>
+</form>
+
+{% if unavailable %}
+<div class="waiting"><p>{{ unavailable }}</p></div>
+{% else %}
+{# Demo step 11 is a sentence, not a table, so the sentence comes first. #}
+<div class="live"><p>{{ report.summary }}</p></div>
+
+<table>
+  <tr><th></th><th>Actions</th></tr>
+  <tr><td>In total</td><td>{{ report.total }}</td></tr>
+  <tr><td>Allowed outright</td><td>{{ report.auto }}</td></tr>
+  <tr><td>Needed a person</td><td>{{ report.needed_approval }}</td></tr>
+  <tr><td>Approved</td><td>{{ report.approved }}</td></tr>
+  <tr><td>Rejected</td><td>{{ report.rejected }}</td></tr>
+  <tr><td>Still waiting</td><td>{{ report.waiting }}</td></tr>
+  <tr><td>Expired unanswered</td><td>{{ report.expired }}</td></tr>
+  <tr><td>Blocked</td><td>{{ report.denied }}</td></tr>
+  <tr><td>Ran and verified</td><td>{{ report.verified }}</td></tr>
+  <tr><td>Rolled back by the check afterwards</td><td>{{ report.rolled_back }}</td></tr>
+  <tr><td>Undone by a person</td><td>{{ report.undone }}</td></tr>
+</table>
+
+<h2>Reached beyond the person's access</h2>
+{% if report.outside_access.proven %}
+<div class="live">
+  <p><strong>{{ report.outside_access.reached }}</strong>.
+    {{ report.outside_access.basis }}</p>
+  <p class="muted">{{ report.outside_access.blocked }} attempt(s) were refused by
+    the database itself.</p>
+</div>
+{% else %}
+<div class="waiting">
+  <p>Not proved from the log alone. {{ report.outside_access.basis }}</p>
+</div>
+{% endif %}
+
+{% if report.denials %}
+<h2>Why things were blocked</h2>
+<table>
+  <tr><th>Reason</th><th>Times</th></tr>
+  {% for code, count in report.denials.items() %}
+  <tr><td><code>{{ code }}</code></td><td>{{ count }}</td></tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<h2>Audit chain</h2>
+{% if report.chain.intact %}
+<p>Intact, {{ report.chain.entries }} entries.</p>
+{% else %}
+<div class="blocked"><p>Broken at entry {{ report.chain.broken_at }}.
+  {{ report.chain.detail }}</p></div>
+{% endif %}
+
+<p>
+  <a href="/apps/{{ app.app_id }}/evidence.json{% if since or until %}?since={{ since }}&amp;until={{ until }}{% endif %}">
+    Download this report as JSON</a>
+</p>
+{% endif %}
+{% endblock %}

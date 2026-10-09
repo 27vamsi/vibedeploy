@@ -25,14 +25,42 @@ dev = [
     # Starlette needs this to read *any* form body, including the urlencoded
     # one the sidecar's own login page posts.
     "python-multipart>=0.0.9",
+    # M7 adds the control plane and the worker: their own schema and
+    # migrations, password hashing, and a dashboard rendered server side.
+    "alembic>=1.14",
+    "argon2-cffi>=23.1",
+    "jinja2>=3.1",
+    # M10's agent policy (contract 7.5) is YAML, read with safe_load only.
+    "pyyaml>=6.0",
+    # M13's MCP front door (section 21): Streamable HTTP, the official SDK.
+    "mcp>=2.3",
 ]
 
 # Listed explicitly; add each new top-level package as its milestone lands.
 [tool.setuptools]
-packages = ["kernel", "buildjob", "sidecar"]
+packages = [
+    "kernel",
+    "buildjob",
+    "sidecar",
+    "control_plane",
+    "control_plane.api",
+    "control_plane.web",
+    "worker",
+    "worker.pipeline",
+    "worker.runtimes",
+    "gateway",
+    "gateway.connectors",
+]
 
 [tool.setuptools.package-data]
 kernel = ["sql/*.sql", "sql/templates/*.sql"]
+control_plane = [
+    "alembic.ini",
+    "migrations/*.py",
+    "migrations/*.mako",
+    "migrations/versions/*.py",
+]
+"control_plane.web" = ["templates/*.html"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

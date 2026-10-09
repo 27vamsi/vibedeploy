@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}Agents &middot; {{ app.name }}{% endblock %}
+{% block body %}
+<p class="muted"><a href="/apps/{{ app.app_id }}">{{ app.name }}</a> &rsaquo; agents</p>
+<h1>Agents</h1>
+
+{# 19.5: the key is shown once and never again. #}
+{% if minted %}
+<div class="waiting">
+  <p><strong>{{ minted.agent }}</strong>'s key. Copy it now &mdash; it is not stored
+    anywhere it can be read back, so this is the only time it is shown.</p>
+  <p><code>{{ minted.key }}</code></p>
+</div>
+{% endif %}
+
+{% if refused %}
+<div class="blocked"><p>{{ refused }}</p></div>
+{% endif %}
+
+{# 19.5 has three switches, and the two broad ones are here where they can be
+   found in a hurry. #}
+<h2>Switches</h2>
+<form method="post" action="/apps/{{ app.app_id }}/agents-enabled">
+  <input type="hidden" name="on" value="{{ "false" if app.agents_enabled else "true" }}">
+  <p>
+    Agents on this app are
+    <strong>{{ "on" if app.agents_enabled else "off" }}</strong>.
+    <button type="submit">Turn them {{ "off" if app.agents_enabled else "on" }}</button>
+  </p>
+</form>
+<form method="post" action="/kill-switch">
+  <input type="hidden" name="on" value="{{ "false" if kill_switch else "true" }}">
+  <input type="hidden" name="back" value="/apps/{{ app.app_id }}/agents">
+  <p>
+    Every agent everywhere is
+    <strong>{{ "stopped" if kill_switch else "running" }}</strong>.
+    <button type="submit">{{ "Let them run" if kill_switch else "Stop all agents" }}</button>
+  </p>
+</form>
+
+{% if agents %}
+<table>
+  <tr><th>Agent</th><th>Works for</th><th>Status</th><th>Added</th></tr>
+  {% for agent in agents %}
+  <tr>
+    <td><a href="/apps/{{ app.app_id }}/agents/{{ agent.id }}">{{ agent.name }}</a></td>
+    <td>{{ people[agent.acts_for_user_id].email if agent.acts_for_user_id in people else "" }}</td>
+    <td>{{ "active" if agent.status == statuses.active.value else "revoked" }}</td>
+    <td class="muted">{{ agent.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No agents yet.</p>
+{% endif %}
+
+<h2>Add an agent</h2>
+{% if all_people %}
+<form method="post" action="/apps/{{ app.app_id }}/agents">
+  <label>Name <input name="name" required></label>
+  {# An agent works for exactly one person, and that is the identity the
+     gateway sets on every transaction it opens. #}
+  <label>Works for
+    <select name="acts_for" required>
+      {% for person in all_people %}
+      <option value="{{ person.id }}">{{ person.email }} ({{ person.role }})</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>Policy (contract 7.5)
+    <textarea name="policy_yaml" rows="12" cols="70" required>agent: helper
+acts_for: {{ all_people[0].email }}
+session_ttl_minutes: 30
+rate_limit_per_minute: 60
+postgres:
+  default: {read: auto}
+  tables:
+    todos: {read: auto, update: approve}
+</textarea>
+  </label>
+  <label>
+    <input type="checkbox" name="high_risk_ack" value="true">
+    I understand that this policy lets something high-risk happen without
+    anyone approving it (19.3)
+  </label>
+  <button type="submit">Add agent</button>
+</form>
+{% else %}
+<p class="muted">Add a person to this app first: an agent works for exactly one
+  of them, and gets exactly their access.</p>
+{% endif %}
+{% endblock %}

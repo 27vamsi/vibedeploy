@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Apps</h1>
+
+{% if apps %}
+<table>
+  <tr><th>Name</th><th>Id</th><th>Protection</th><th>Repo</th></tr>
+  {% for app in apps %}
+  <tr>
+    <td><a href="/apps/{{ app.app_id }}">{{ app.name }}</a></td>
+    <td><code>{{ app.app_id }}</code></td>
+    <td>{{ app.protection }}</td>
+    <td class="muted">{{ app.repo }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">Nothing deployed yet.</p>
+{% endif %}
+
+<h2>Add an app</h2>
+<form method="post" action="/apps">
+  <label>Name <input name="name" required></label>
+  <label>Repository <input name="repo" size="60" required></label>
+  <button type="submit">Add</button>
+</form>
+{% endblock %}

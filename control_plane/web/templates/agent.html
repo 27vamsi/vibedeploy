@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}{{ agent.name }} &middot; {{ app.name }}{% endblock %}
+{% block body %}
+<p class="muted">
+  <a href="/apps/{{ app.app_id }}">{{ app.name }}</a> &rsaquo;
+  <a href="/apps/{{ app.app_id }}/agents">agents</a> &rsaquo; {{ agent.name }}
+</p>
+<h1>{{ agent.name }}</h1>
+<p class="muted">
+  Works for {{ acts_for.email if acts_for else "somebody who has been removed" }}
+  &middot; {{ "active" if agent.status == statuses.active.value else "revoked" }}
+  &middot; added by {{ agent.created_by }}
+</p>
+
+{% if agent.status != statuses.active.value %}
+<div class="blocked">
+  <p>This agent has been revoked. Its key no longer works, its sessions are
+    over, and anything of its that was waiting to be approved was cancelled.</p>
+</div>
+{% endif %}
+
+{% if refused %}
+<div class="blocked"><p>{{ refused }}</p></div>
+{% endif %}
+
+<h2>Policy</h2>
+{# Contract 7.5: every edit is a new version, and an action records the version
+   that decided it. Editing a policy cannot change the answer to "why was this
+   allowed?" about something that already happened. #}
+<form method="post" action="/apps/{{ app.app_id }}/agents/{{ agent.id }}/policy">
+  <label>
+    <textarea name="policy_yaml" rows="16" cols="70" required>{{ latest.policy_yaml if latest else "" }}</textarea>
+  </label>
+  <label>
+    <input type="checkbox" name="high_risk_ack" value="true"
+           {% if latest and latest.high_risk_ack %}checked{% endif %}>
+    I understand that this policy lets something high-risk happen without
+    anyone approving it (19.3)
+  </label>
+  <button type="submit">Save as version {{ (latest.version + 1) if latest else 1 }}</button>
+</form>
+
+<h2>Version history</h2>
+{% if versions %}
+<table>
+  <tr><th>Version</th><th>Author</th><th>High-risk acknowledged</th><th>Saved</th></tr>
+  {% for version in versions %}
+  <tr>
+    <td>{{ version.version }}</td>
+    <td>{{ version.author }}</td>
+    <td>{{ "yes" if version.high_risk_ack else "no" }}</td>
+    <td class="muted">{{ version.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+{% if agent.status == statuses.active.value %}
+<h2>Revoke</h2>
+<p class="muted">One click does four things: disables the agent, deletes its
+  key, ends its sessions, and cancels anything of its that was waiting for a
+  person.</p>
+<form method="post" action="/apps/{{ app.app_id }}/agents/{{ agent.id }}/revoke">
+  <button type="submit">Revoke {{ agent.name }}</button>
+</form>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}{{ app.name }}{% endblock %}
+{% block body %}
+<h1>{{ app.name }}</h1>
+<p class="muted"><code>{{ app.app_id }}</code> &middot; {{ app.repo }} &middot;
+  protection: {{ app.protection }}</p>
+<p>
+  <a href="/apps/{{ app.app_id }}/agents">Agents</a> &middot;
+  <a href="/apps/{{ app.app_id }}/approvals">Approvals</a> &middot;
+  <a href="/apps/{{ app.app_id }}/activity">Activity</a> &middot;
+  <a href="/apps/{{ app.app_id }}/evidence">Evidence</a> &middot;
+  <a href="/audit">Audit</a>
+</p>
+
+<h2>Deploy</h2>
+<form method="post" action="/apps/{{ app.app_id }}/deploy">
+  <label>Branch or commit <input name="commit_sha" value="clean" required></label>
+
+  {# Section 10. Asked once; the answers are reused, and only new or changed
+     tables produce follow-ups on later deployments. #}
+  {% for question in questions %}
+  <fieldset>
+    <legend>{{ question.text }}</legend>
+    {% for value, label in question.options %}
+    <label>
+      <input type="radio" name="{{ question.id }}" value="{{ value }}"
+             {% if answers.get(question.id) == value
+                or (question.id == 'sensitive' and answers.get('sensitive') == (value == 'yes')) %}checked{% endif %}
+             required>
+      {{ label }}
+    </label>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+
+  <button type="submit">Deploy</button>
+</form>
+
+<h2>Deployments</h2>
+{% if deployments %}
+<table>
+  <tr><th>Commit</th><th>Status</th><th>Why</th><th>When</th></tr>
+  {% for deployment in deployments %}
+  <tr>
+    <td><a href="/deployments/{{ deployment.id }}">{{ deployment.commit_sha }}</a></td>
+    <td>{{ deployment.status }}</td>
+    <td class="muted">{{ deployment.blocked_reason or "" }}</td>
+    <td class="muted">{{ deployment.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% else %}
+<p class="muted">No deployments yet.</p>
+{% endif %}
+
+<h2>People</h2>
+{% if users %}
+<table>
+  <tr><th>Email</th><th>Role</th><th>Status</th></tr>
+  {% for user in users %}
+  <tr>
+    <td>{{ user.email }}</td>
+    <td>{{ user.role }}</td>
+    <td>{{ "not ready yet" if user.disabled else "can log in" }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
+
+<form method="post" action="/apps/{{ app.app_id }}/users">
+  <label>Email <input name="email" type="email" required></label>
+  <label>Password <input name="password" type="password" required></label>
+  <label>Role
+    <select name="role"><option value="member">member</option><option value="admin">admin</option></select>
+  </label>
+  <button type="submit">Add person</button>
+</form>
+{% endblock %}

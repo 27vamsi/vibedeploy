@@ -248,9 +248,41 @@ async def _introspect(conn: asyncpg.Connection, schema: str) -> dict[str, Any]:
     }
 
 
+def app_schema(graph: dict[str, Any]) -> dict[str, Any]:
+    """The part of the graph the app's own migrations decide.
+
+    Policies, the two RLS flags and the `vd_` helper functions are ours, not the
+    app's. They have to be introspected, because the attack's structural checks
+    read them back out of the live catalog, but they must not be fingerprinted:
+    a schema hashes differently before and after we protect it, so a redeploy of
+    unchanged code would look like changed code and block forever.
+
+    What is left is exactly what contract 7.2's `schema_hash` is for: "this is
+    the shape the rules were derived against".
+    """
+    return {
+        "version": graph["version"],
+        "tables": {
+            name: {
+                key: value
+                for key, value in entry.items()
+                if key not in ("rls_enabled", "rls_forced")
+            }
+            for name, entry in graph["tables"].items()
+        },
+        "enums": graph["enums"],
+        "views": graph["views"],
+        "functions": [
+            function
+            for function in graph["functions"]
+            if not function["name"].startswith("vd_")
+        ],
+    }
+
+
 def schema_hash(graph: dict[str, Any]) -> str:
     """Stable fingerprint of a graph, for contract 7.2's `schema_hash`."""
     canonical = json.dumps(
-        graph, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        app_schema(graph), sort_keys=True, separators=(",", ":"), ensure_ascii=True
     )
     return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()

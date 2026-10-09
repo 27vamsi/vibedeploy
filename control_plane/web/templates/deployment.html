@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}{{ app.name }} @ {{ deployment.commit_sha }}{% endblock %}
+{% block body %}
+{# While the pipeline is still moving, refresh the page rather than invent a
+   progress bar. There is nothing to show but the status, and the status is
+   the truth. #}
+{% set settled = deployment.status in ('blocked', 'live', 'error',
+                                       'awaiting_answers', 'awaiting_confirmation') %}
+<div {% if not settled %}hx-get="/deployments/{{ deployment.id }}"
+     hx-trigger="every 2s" hx-select="body" hx-target="body"{% endif %}>
+
+<h1>{{ app.name }} <span class="muted">@ {{ deployment.commit_sha }}</span></h1>
+<p class="muted">Status: <strong>{{ deployment.status }}</strong>
+  {% if deployment.schema_hash %} &middot; schema {{ deployment.schema_hash[:19] }}…{% endif %}</p>
+
+{% if deployment.status == 'blocked' or deployment.status == 'error' %}
+<div class="blocked">
+  <h2>This did not go live</h2>
+  <p>{{ deployment.blocked_reason }}</p>
+</div>
+{% endif %}
+
+{% if deployment.status == 'live' %}
+<div class="live">
+  <h2>Live</h2>
+  {% if deployment.endpoint %}<p><a href="{{ deployment.endpoint }}">{{ deployment.endpoint }}</a></p>{% endif %}
+</div>
+{% endif %}
+
+{% if deployment.status == 'awaiting_answers' %}
+<div class="waiting">
+  <h2>We need an answer before this can be deployed</h2>
+  <p>Nothing is guessed. Until these are settled, nothing is built.</p>
+</div>
+<form method="post" action="/deployments/{{ deployment.id }}/answers">
+  {% for question in deployment.questions %}
+  <fieldset>
+    <legend>{{ question.text }}</legend>
+    {% for option in question.options %}
+    <label>
+      <input type="radio" name="{{ question.id }}" value="{{ option }}" required>
+      <code>{{ option }}</code>
+    </label>
+    {% endfor %}
+  </fieldset>
+  {% endfor %}
+  <button type="submit">Answer</button>
+</form>
+{% endif %}
+
+{% if deployment.explanation %}
+<h2>The rules, in plain English</h2>
+<ul>
+  {% for line in deployment.explanation %}<li>{{ line }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% if deployment.status == 'awaiting_confirmation' %}
+<form method="post" action="/deployments/{{ deployment.id }}/confirm">
+  <p>If that is right, we will build it and then try to break it.</p>
+  <button type="submit">Confirm these rules</button>
+</form>
+{% endif %}
+
+{% if model and model.confirmed_at %}
+<p class="muted">Confirmed by {{ model.confirmed_by }}
+  on {{ model.confirmed_at.strftime("%Y-%m-%d %H:%M") }}.</p>
+{% endif %}
+
+{% if runs %}
+<h2>The attack</h2>
+<table>
+  <tr><th>Run as</th><th>Checks</th><th>Passed</th><th>Failed</th></tr>
+  {% for run in runs %}
+  <tr>
+    <td>{{ run.role }}</td>
+    <td>{{ run.total }}</td>
+    <td>{{ run.passed }}</td>
+    <td>{{ run.failed }}</td>
+  </tr>
+  {% endfor %}
+</table>
+<p class="muted">The same suite runs as the app's role and as an agent's role.
+  Identical results are what proves an agent cannot exceed the person it works
+  for.</p>
+
+{% for run in runs %}{% if run.report_json.failures %}
+<h3>Failures as {{ run.role }}</h3>
+<ul>
+  {% for failure in run.report_json.failures %}
+  <li>{{ failure.message }}</li>
+  {% endfor %}
+</ul>
+{% endif %}{% endfor %}
+{% endif %}
+
+</div>
+{% endblock %}

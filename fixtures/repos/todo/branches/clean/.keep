@@ -1,0 +1,2 @@
+The clean branch changes nothing. It exists so that "clean" is a branch name
+like any other, and the pipeline has no special case for it.

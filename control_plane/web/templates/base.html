@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}vibedeploy{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+  <style>
+    body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 52rem; color: #111; }
+    h1, h2, h3 { font-weight: 600; }
+    a { color: #0b5; }
+    fieldset { border: 1px solid #ddd; margin: 0 0 1rem; }
+    label { display: block; margin: .3rem 0; }
+    table { border-collapse: collapse; width: 100%; }
+    td, th { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #eee; }
+    code { background: #f4f4f4; padding: 0 .2rem; }
+    .blocked { background: #fdecea; border-left: 4px solid #c00; padding: .8rem; }
+    .live { background: #e8f8ee; border-left: 4px solid #0a5; padding: .8rem; }
+    .waiting { background: #fff8e1; border-left: 4px solid #e0a800; padding: .8rem; }
+    .muted { color: #666; }
+  </style>
+</head>
+<body>
+  <p><a href="/">vibedeploy</a></p>
+  {% block body %}{% endblock %}
+</body>
+</html>

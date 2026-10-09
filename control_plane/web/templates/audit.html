@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block body %}
+<h1>Audit chain</h1>
+<p class="muted">Every entry carries the hash of the one before it, and nothing
+  may update or delete a row. Re-reading the chain is the only way to be told
+  it is intact, so this page re-reads it on every load.</p>
+
+{% if unavailable %}
+<div class="waiting"><p>{{ unavailable }}</p></div>
+{% elif chain.intact %}
+<div class="live">
+  <p>Intact. {{ chain.entries }} entries, each following the one before it.</p>
+</div>
+{% else %}
+<div class="blocked">
+  <p>Broken at entry {{ chain.broken_at }}. {{ chain.detail }}</p>
+  <p>{{ chain.entries }} entries were read before the break.</p>
+</div>
+{% endif %}
+{% endblock %}

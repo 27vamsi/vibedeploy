@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Activity &middot; {{ app.name }}{% endblock %}
+{% block body %}
+<p class="muted"><a href="/apps/{{ app.app_id }}">{{ app.name }}</a> &rsaquo; activity</p>
+<h1>What the agents did</h1>
+
+{% if unavailable %}
+<div class="waiting"><p>{{ unavailable }}</p></div>
+{% endif %}
+
+{% if said %}
+<p class="muted">{{ said }}</p>
+{% endif %}
+
+{% if rows %}
+<table>
+  <tr>
+    <th>Agent</th><th>What</th><th>Status</th><th>Why</th><th>Rows</th>
+    <th>Approved by</th><th>When</th><th></th>
+  </tr>
+  {% for action in rows %}
+  <tr>
+    <td>{{ names.get(action.agent_id, action.agent_id) }}</td>
+    <td>{{ action.tool }}</td>
+    <td>{{ action.status }}</td>
+    <td class="muted">{{ action.reason or "" }}</td>
+    <td>{{ action.affected if action.affected is not none else "" }}</td>
+    <td class="muted">{{ action.approved_by or "" }}</td>
+    <td class="muted">{{ action.created_at }}</td>
+    <td>
+      {# A button, not a decision: the gateway refuses to undo a read, an
+         action that never ran, and one whose rows have moved since. #}
+      {% if action.undoable and admins %}
+      <form method="post" action="/apps/{{ app.app_id }}/actions/{{ action.action_id }}/undo">
+        <input type="hidden" name="back" value="/apps/{{ app.app_id }}/activity">
+        <input type="hidden" name="approver" value="{{ admins[0].email }}">
+        <button type="submit">Undo</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+{% elif not unavailable %}
+<p class="muted">No agent has done anything on this app yet.</p>
+{% endif %}
+
+<p>
+  <a href="/apps/{{ app.app_id }}/approvals">Waiting for a person</a> &middot;
+  <a href="/apps/{{ app.app_id }}/evidence">Evidence report</a> &middot;
+  <a href="/audit">Audit chain</a>
+</p>
+{% endblock %}

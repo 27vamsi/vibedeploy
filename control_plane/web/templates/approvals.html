@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}Approvals &middot; {{ app.name }}{% endblock %}
+{% block body %}
+<p class="muted"><a href="/apps/{{ app.app_id }}">{{ app.name }}</a> &rsaquo; approvals</p>
+<h1>Waiting for a person</h1>
+
+{% if unavailable %}
+<div class="waiting"><p>{{ unavailable }}</p></div>
+{% endif %}
+
+{% if said %}
+<p class="muted">{{ said }}</p>
+{% endif %}
+
+{% if not admins %}
+<div class="waiting">
+  <p>Nobody on this app is an admin, and 19.4 says an approver has to be one.
+    Add an admin before anything here can be approved.</p>
+</div>
+{% endif %}
+
+{% if waiting %}
+{# 19.4 says what an approver gets to see before deciding: who asked, who they
+   work for, what they want to do, what would change, how risky it is and why.
+   The diff is the dry run's, and the approval is bound to its hash — if what
+   would happen changes, the approval is void and this comes back here. #}
+{% for action in waiting %}
+<div class="waiting">
+  <h2>{{ action.tool }}</h2>
+  <p>
+    <strong>{{ names.get(action.agent_id, action.agent_id) }}</strong>, working for
+    <strong>{{ names.get(action.acts_for, action.acts_for) }}</strong>
+    &middot; risk {{ action.risk }}
+    {% if action.affected is not none %}&middot; {{ action.affected }} row(s){% endif %}
+  </p>
+  <p>{{ action.reason }}</p>
+  {# One entry per row the dry run touched: `{key, before, after}`, with a
+     missing side meaning the row is being created or deleted. #}
+  <table>
+    <tr><th>Row</th><th>Now</th><th>Would become</th></tr>
+    {% for change in action.diff %}
+    <tr>
+      <td><code>{{ change.key }}</code></td>
+      <td>{{ change.before if change.before is not none else "does not exist yet" }}</td>
+      <td>{{ change.after if change.after is not none else "gone" }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p class="muted">
+    What would change, hashed: <code>{{ action.diff_hash }}</code>.
+    {% if action.expires_at %}Waiting until {{ action.expires_at }}.{% endif %}
+  </p>
+  <form method="post" action="/apps/{{ app.app_id }}/actions/{{ action.action_id }}/approve">
+    <label>Approving as
+      <select name="approver" required>
+        {% for admin in admins %}<option value="{{ admin.email }}">{{ admin.email }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit">Approve</button>
+  </form>
+  <form method="post" action="/apps/{{ app.app_id }}/actions/{{ action.action_id }}/reject">
+    <label>Rejecting as
+      <select name="approver" required>
+        {% for admin in admins %}<option value="{{ admin.email }}">{{ admin.email }}</option>{% endfor %}
+      </select>
+    </label>
+    <button type="submit">Reject</button>
+  </form>
+</div>
+{% endfor %}
+{% elif not unavailable %}
+<p class="muted">Nothing is waiting.</p>
+{% endif %}
+
+<p><a href="/apps/{{ app.app_id }}/activity">What the agents did</a></p>
+{% endblock %}
