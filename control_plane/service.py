@@ -18,7 +18,9 @@ from typing import Any, Mapping
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane import jobs
+from control_plane import appenv, generations, jobs
+from control_plane import secrets as secrets_store
+from control_plane.config import ControlPlaneConfig
 from control_plane.models import (
     AccessModel,
     Action,
@@ -79,6 +81,21 @@ async def create_builder(session: AsyncSession, *, email: str, password: str) ->
     return builder
 
 
+async def ensure_builder(session: AsyncSession, *, email: str, password: str) -> Builder:
+    """The sole operator of this installation, created if it has none.
+
+    V0.5 has one operator and no sign-up flow, so this is how both the
+    environment-driven bootstrap and the test fixtures get hold of one. The
+    caller names the email and the password: what this replaced invented both,
+    which meant an unauthenticated console could not tell "nobody has set this
+    up" from "this is who set it up" — and answered the second to everybody.
+    """
+    existing = (await session.execute(select(Builder).limit(1))).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    return await create_builder(session, email=email, password=password)
+
+
 async def create_app(
     session: AsyncSession,
     *,
@@ -104,17 +121,25 @@ async def start_deployment(
     session: AsyncSession,
     *,
     app: App,
-    commit_sha: str,
+    ref: str,
     answers: Mapping[str, Any] | None = None,
 ) -> Deployment:
-    """Queue one attempt to put a commit live.
+    """Queue one attempt to put `ref` live.
+
+    `ref` is a branch, a tag or a commit, whichever the builder named. The
+    commit it resolves to is recorded by the worker once git has said, because
+    only the clone knows: a branch can move between queueing and building.
 
     The four questions of section 10 must already be answered, here or on a
     previous deployment. There is no default: a deployment that cannot say who
     may see what has nothing to enforce, so it never starts.
 
     A previously live deployment is deliberately left alone. If this one is
-    blocked, the old version keeps running.
+    blocked, the old version keeps running. Queueing does bump the app's
+    generation, which is not the same thing: it revokes nothing, it only means
+    that any worker still running an earlier attempt has lost the right to
+    publish a route. `control_plane/generations.py` says why that has to happen
+    here rather than at cutover.
     """
     merged = dict(app.answers or {})
     merged.update(answers or {})
@@ -127,9 +152,10 @@ async def start_deployment(
 
     deployment = Deployment(
         app_id=app.id,
-        commit_sha=commit_sha,
+        ref=ref,
         status=DeploymentStatus.queued.value,
         answers=merged,
+        generation=await generations.claim_generation(session, app),
     )
     session.add(deployment)
     await session.flush()
@@ -361,3 +387,39 @@ async def set_app_agents(session: AsyncSession, *, app: App, on: bool) -> None:
     read for each of them.
     """
     app.agents_enabled = on
+
+
+# ---------------------------------------------------------------------------
+# The app's own settings (18.1, "builder env vars")
+# ---------------------------------------------------------------------------
+
+
+def set_app_env(
+    config: ControlPlaneConfig, app_id: str, env: Mapping[str, str]
+) -> dict[str, str]:
+    """Store the variables the app's process will be given.
+
+    In the secret store, not the control plane's database: a Stripe key is a
+    credential, and section 18.1 already says the runtime secret is where the
+    app's settings live. This is the whole set, not a patch, so removing one is
+    sending it again without that one.
+
+    Not a coroutine because nothing here touches the database.
+    """
+    checked = appenv.validate(env)
+    secrets_store.store_for(config).update(
+        secrets_store.secret_name(app_id, secrets_store.RUNTIME), {"env": checked}
+    )
+    return checked
+
+
+def app_env(config: ControlPlaneConfig, app_id: str) -> dict[str, str]:
+    """What is stored, for a form to render. Values included: the form shows
+    names only, and that is the template's decision, not this function's."""
+    try:
+        secret = secrets_store.store_for(config).get(
+            secrets_store.secret_name(app_id, secrets_store.RUNTIME)
+        )
+    except secrets_store.SecretNotFound:
+        return {}
+    return appenv.safe(secret.get("env"))

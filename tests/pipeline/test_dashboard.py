@@ -13,7 +13,7 @@ import httpx
 import pytest_asyncio
 
 from control_plane.models import DeploymentStatus
-from tests.pipeline.conftest import REPO
+from tests.pipeline.conftest import REPO, console
 
 BASE_ANSWERS = {
     "audience": "me",
@@ -25,9 +25,7 @@ BASE_ANSWERS = {
 
 @pytest_asyncio.fixture(scope="session")
 async def browser(pipeline):
-    async with httpx.AsyncClient(
-        base_url=pipeline.config.public_url, follow_redirects=True, timeout=30
-    ) as client:
+    async with console(pipeline) as client:
         yield client
 
 
@@ -44,7 +42,7 @@ async def test_a_builder_answers_on_the_page_and_the_pipeline_moves(
     pipeline.app_ids.append(app_id)
 
     page = await browser.post(
-        f"/apps/{app_id}/deploy", data={"commit_sha": "unlinked", **BASE_ANSWERS}
+        f"/apps/{app_id}/deploy", data={"ref": "unlinked", **BASE_ANSWERS}
     )
     assert page.status_code == 200, page.text
     deployment_url = str(page.url)
@@ -83,7 +81,7 @@ async def test_a_blocked_deploy_shows_its_reason(pipeline, browser):
     pipeline.app_ids.append(app_id)
 
     page = await browser.post(
-        f"/apps/{app_id}/deploy", data={"commit_sha": "leaky_view", **BASE_ANSWERS}
+        f"/apps/{app_id}/deploy", data={"ref": "leaky_view", **BASE_ANSWERS}
     )
     deployment_url = str(page.url)
     await pipeline.drain()
@@ -100,7 +98,7 @@ async def test_confirming_something_that_is_not_ready_is_refused(pipeline, brows
     pipeline.app_ids.append(app_id)
 
     page = await browser.post(
-        f"/apps/{app_id}/deploy", data={"commit_sha": "unlinked", **BASE_ANSWERS}
+        f"/apps/{app_id}/deploy", data={"ref": "unlinked", **BASE_ANSWERS}
     )
     deployment_url = str(page.url)
     await pipeline.drain()

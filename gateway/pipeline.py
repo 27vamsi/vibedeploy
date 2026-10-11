@@ -141,10 +141,16 @@ class Gateway:
         *,
         sessionmaker: async_sessionmaker[AsyncSession],
         secrets_root: Path,
+        secret_key: str = "",
         limiter: RateLimiter | None = None,
     ):
         self._sessions = sessionmaker
-        self._store = SecretStore(Path(secrets_root))
+        # The same key the control plane and the worker use. The gateway may
+        # read only `vd/apps/*/agent-*` (CLAUDE.md), and that restriction is
+        # about which *names* it asks for; the key is what makes any of them
+        # readable at all, so withholding it here would just stop the gateway
+        # working rather than narrow it.
+        self._store = SecretStore(Path(secrets_root), key=secret_key)
         self._limiter = limiter or RateLimiter()
         # Keyed by app, invalidated by the live deployment id, so a redeploy
         # that changes the schema changes what an agent may name.

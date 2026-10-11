@@ -23,7 +23,6 @@ from sqlalchemy import select
 from control_plane import secrets as secret_store
 from control_plane.config import ControlPlaneConfig
 from control_plane.models import AccessModel, App, AppUser, Job
-from control_plane.secrets import SecretStore
 from kernel.render import quote_ident
 from worker.pipeline import DONE, Sessions, Verdict
 
@@ -59,7 +58,7 @@ async def handle(
         principal = model.model_json["principal"]
         app_id, email, user_id = app.app_id, user.email, user.id
 
-    store = SecretStore(config.state_root / "secrets")
+    store = secret_store.store_for(config)
     migrator = store.get(secret_store.secret_name(app_id, secret_store.MIGRATOR))
 
     conn = await asyncpg.connect(migrator["dsn"])

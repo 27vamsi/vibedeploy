@@ -2,8 +2,14 @@
 #
 # Ports are deliberately non-default so this never collides with a Postgres
 # already installed on the host:
-#   postgres  127.0.0.1:55432
-#   pgbouncer 127.0.0.1:56432   (transaction pooling)
+#   postgres  127.0.0.1:55432   (the customer database)
+#   pgbouncer 127.0.0.1:55433   (transaction pooling)
+#   buildpg   127.0.0.1:55434   (the build job's throwaway, holds no app data)
+#
+# Both are deliberately below 55834. Hyper-V reserves blocks of high ports on
+# Windows (`netsh interface ipv4 show excludedportrange protocol=tcp`), and
+# 56432 lands inside one of them, so Docker cannot bind it and the pooling test
+# cannot run. Either port can be moved with `VD_PGBOUNCER_PORT`.
 #
 # Everything binds to 127.0.0.1 only. These are local development credentials
 # and are meant to be in the repo; nothing here is ever used on AWS.
@@ -38,13 +44,35 @@ services:
       - -c
       - max_connections=200
 
+  # The build job's throwaway database, and the reason it is a second instance
+  # rather than a second schema: the build job runs an app's own migrations, so
+  # it is handed admin of whatever it is pointed at. Pointing it at `postgres`
+  # above would hand it admin of every other app's data. Nothing in here is ever
+  # read back; it is migrated, seeded, attacked and forgotten.
+  buildpg:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: vd_admin
+      POSTGRES_PASSWORD: vd_local_password
+      POSTGRES_DB: vibedeploy_build
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "127.0.0.1:55434:5432"
+    # No volume on purpose: a restart is a clean slate, which is what throwaway
+    # means.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vd_admin -d vibedeploy_build"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   pgbouncer:
     image: edoburu/pgbouncer:v1.23.1-p2
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:56432:6432"
+      - "127.0.0.1:55433:6432"
     volumes:
       - ./pgbouncer/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./pgbouncer/userlist.txt:/etc/pgbouncer/userlist.txt:ro
@@ -54,19 +82,40 @@ services:
       timeout: 3s
       retries: 30
 
-  # Routes <app>.localhost to the per-app login gate. Not used until M6, so it
-  # is not started by default: bring it up explicitly with
-  #   docker compose -f infra/local/docker-compose.yml up -d caddy
+  # Routes <subdomain>.localhost to that app's login gate, and is the only way
+  # in: an app is reachable through its sidecar or not at all.
+  #
+  # Started by default, because a deploy with no proxy to publish a route into
+  # blocks rather than falling back to handing out a port number. There is no
+  # raw-port fallback anywhere, so this is not optional infrastructure.
+  #
+  # Its routes are not in the Caddyfile. They are written over the admin API on
+  # 2019 from what the control plane's database says is live, which is what lets
+  # the reconciler re-assert them rather than trust them.
+  #
+  # 55080 and 55019 rather than 80 and 2019, for the same reason the Postgres
+  # ports are 554xx: 80 collides with whatever else on a laptop thinks it owns
+  # http, and 8080 and 2019 are both popular enough to already be taken — on
+  # this machine 8080 was, and the failure is an unhelpful "socket access
+  # forbidden" from the Windows port reservations rather than "in use".
   caddy:
     image: caddy:2
-    profiles: ["gateway"]
     ports:
-      - "127.0.0.1:80:80"
-      - "127.0.0.1:443:443"
+      - "127.0.0.1:55080:80"
+      # The admin API can rewrite the entire proxy configuration, so it is
+      # published to the loopback interface and nowhere else.
+      - "127.0.0.1:55019:2019"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    healthcheck:
+      # The admin API, not port 80: with no routes written yet there is nothing
+      # on 80 to answer, and "no apps are deployed" is not unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
 
 volumes:
   postgres_data:

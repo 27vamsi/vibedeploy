@@ -17,7 +17,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from control_plane.models import BuildPhase, BuildToken
@@ -44,6 +44,31 @@ async def mint(
     )
     await session.flush()
     return token
+
+
+async def outstanding(session: AsyncSession, deployment_id: uuid.UUID) -> bool:
+    """Was a build job started that never reported?
+
+    An unspent token is the one durable trace of that, and it is what lets a
+    reconciler tell two states apart that otherwise look identical in the
+    `deployments` row:
+
+      - `verifying` with no token: confirmed, and nobody has started proving it
+        yet. The queue will get to it.
+      - `verifying` with an unspent token: a build job was handed a one-shot
+        callback and the worker waiting for it is gone. Nothing will ever spend
+        that token, so this deployment will sit at `verifying` for ever.
+
+    `expires_at` is deliberately not in the condition. A token that has run out
+    of time is even more certainly never going to be spent.
+    """
+    found = await session.execute(
+        select(BuildToken.id).where(
+            BuildToken.deployment_id == deployment_id,
+            BuildToken.used_at.is_(None),
+        )
+    )
+    return found.first() is not None
 
 
 async def spend(

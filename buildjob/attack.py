@@ -26,7 +26,7 @@ from typing import Any, Mapping, Sequence
 
 import asyncpg
 
-from buildjob.introspect import introspect
+from buildjob.introspect import BOOKKEEPING, introspect
 from buildjob.seed import SeedPlan, Values, build_row
 from kernel.messages import message
 from kernel.provision import AppRoles
@@ -531,9 +531,65 @@ JOIN pg_roles parent ON parent.oid = m.roleid
 WHERE child.rolname = $1 AND parent.rolname = $2
 """
 
+# Asked directly rather than taken from the graph, because the whole point of
+# these tables is that the graph does not describe them. Readme.md section 15.
+_BOOKKEEPING = """
+SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')
+  AND c.relname = ANY($2::text[])
+ORDER BY c.relname
+"""
+
 
 def _is_literal_true(expression: str | None) -> bool:
     return expression is not None and expression.strip().lower() in ("true", "(true)")
+
+
+async def _bookkeeping_checks(
+    conn: asyncpg.Connection, roles: AppRoles
+) -> list[Check]:
+    """The tables left out of the access model are still held to section 3.
+
+    Two independent reasons the app sees nothing in them, asserted separately
+    so that losing one is a counted failure rather than a near miss: RLS with
+    FORCE and no policy, and no privilege at all.
+    """
+    out: list[Check] = []
+    rows = await conn.fetch(_BOOKKEEPING, roles.schema, list(BOOKKEEPING))
+
+    for row in rows:
+        table = row["relname"]
+        qualified = f"{quote_ident(roles.schema)}.{quote_ident(table)}"
+
+        for role in roles.app_facing:
+            reason = None
+            if not row["relrowsecurity"]:
+                reason = "row level security is switched off for it"
+            elif not row["relforcerowsecurity"]:
+                reason = "FORCE row level security is switched off for it"
+            else:
+                for privilege in COMMANDS:
+                    held = await conn.fetchval(
+                        "SELECT has_table_privilege($1, $2, $3)",
+                        role,
+                        qualified,
+                        privilege,
+                    )
+                    if held:
+                        reason = f"it still holds {privilege} on it"
+                        break
+
+            out.append(
+                _ok("bookkeeping_open", table=table, role=role)
+                if reason is None
+                else _fail(
+                    "bookkeeping_open", table=table, role=role, reason=reason
+                )
+            )
+
+    return out
 
 
 def _policy_checks(graph, roles, table) -> list[Check]:
@@ -601,6 +657,8 @@ async def structural(
             checks.append(_fail("unclassified_table", table=table))
         else:
             checks.append(_ok("unclassified_table", table=table))
+
+    checks.extend(await _bookkeeping_checks(conn, roles))
 
     for table in sorted(model["tables"]):
         entry = graph["tables"][table]

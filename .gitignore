@@ -5,3 +5,9 @@ __pycache__/
 .venv/
 
 node_modules/
+
+# The worker's state root: per-app secrets and per-deployment working trees.
+# Stands in for Secrets Manager locally, so it must never reach a commit.
+.vd-state/
+.env
+.env.*

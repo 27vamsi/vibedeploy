@@ -1,103 +1,103 @@
 """Starting the untrusted half, and waiting for it. Readme.md section 3 rule 11.
 
 The worker holds the customer database's admin credentials. An app's own
-migrations must therefore never execute in it, not even behind a `try`. So
-everything that touches app code is started here as a **separate process** and
-the worker's only contact with it is an exit code and a log file.
+migrations must therefore never execute in it, not even behind a `try`, so
+everything that touches app code is started in a **container** and the worker's
+only contact with it is an exit code and a log file.
 
-Locally that is a subprocess against a throwaway schema, which is the weakest
-isolation in the family and is honest about it: M8 replaces `launch` with
-CodeBuild and a one-off ECS task, and nothing above this file changes.
+Two things are rewritten on the way in, and both are why this module exists
+rather than the caller doing it:
 
-Two rules the callers depend on:
+  - **paths.** The container does not share the worker's filesystem, so the
+    checkout, our build-job code and the spec are mounted at fixed places and
+    the spec is edited to name those instead;
+  - **addresses.** Inside a container `127.0.0.1` is the container. The
+    throwaway database and the way home both have to be rewritten or the build
+    job reaches neither.
 
-  - secrets go in a 0600 spec file or the environment, never in `argv`, because
-    `argv` is readable by every process on the box;
-  - a build that is still running after `timeout` is killed and treated as a
-    failure. A build job that never answered proved nothing.
+The caller says *what* to build. This file decides *where*, which is the one
+thing M8 changes when it swaps `docker run` for CodeBuild and a one-off ECS
+task.
+
+Secrets go in a 0600 spec file, never in `argv`, because `argv` is readable by
+every process on the box.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping
 
-from control_plane.config import REPO_ROOT
+from control_plane.config import REPO_ROOT, ControlPlaneConfig
+from worker.pipeline import container
+from worker.pipeline.container import DEFAULT_TIMEOUT, Outcome
 
-# Generous: `verify` migrates, seeds and then attacks a whole schema twice.
-DEFAULT_TIMEOUT = 15 * 60
+BUILD_DOCKERFILE = REPO_ROOT / "infra" / "local" / "buildjob" / "Dockerfile"
 
-TIMED_OUT = (
-    "The build did not finish in time, so nothing about this deployment was"
-    " proved and nothing was deployed."
+# Fixed, because the spec has to name them and nothing else about the container
+# is the caller's business.
+REPO_IN_CONTAINER = "/vd/repo"
+SPEC_IN_CONTAINER = "/vd/spec.json"
+DEPS_IN_CONTAINER = "/vd/deps"
+
+IMAGE_FAILED = (
+    "The image an app's migrations run in could not be built, so they were not"
+    " run and nothing was proved."
 )
 
+# The network the build job gets. The default bridge is right on a laptop: the
+# throwaway database is published on the host's loopback and Docker Desktop's
+# `host.docker.internal` reaches it, which is what the address rewriting above
+# is for.
+#
+# It is wrong on a Linux box, where that rewriting has nothing to rewrite *to*
+# — a loopback-bound port is not reachable from the bridge gateway. There the
+# throwaway database is a compose service with a name, so the build job is put
+# on the network where that name resolves and the DSN names it directly.
+#
+# Deliberately a separate variable from `VD_APP_NETWORK`: a deployed app's
+# network decides who can reach the app, and this one decides what an app's
+# own untrusted migrations can reach. They should be able to differ.
+BUILD_NETWORK = os.environ.get("VD_BUILD_NETWORK") or "bridge"
 
-@dataclass(frozen=True)
-class Outcome:
-    returncode: int
-    log: Path
-
-    @property
-    def ok(self) -> bool:
-        return self.returncode == 0
-
-    def tail(self, limit: int = 2000) -> str:
-        """The end of the log, for `jobs.last_error`.
-
-        Never shown to a builder: this is an operator's breadcrumb, and it can
-        contain anything the app's migrations decided to print.
-        """
-        try:
-            text = self.log.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            return ""
-        return text[-limit:]
+__all__ = [
+    "DEFAULT_TIMEOUT",
+    "Outcome",
+    "deps_volume",
+    "discard_deps",
+    "ensure_build_image",
+    "run_build_job",
+    "write_spec",
+]
 
 
-def child_env(**extra: str) -> dict[str, str]:
-    """The environment for a child process, with the repo importable.
+def deps_volume(workdir: Path) -> container.Volume:
+    """Where the app's own packages go: a volume of its own, and nothing else.
 
-    `PYTHONPATH` is set rather than relying on the working directory so that the
-    child is importable the same way whether it is started from a checkout or
-    from an installed package.
+    Of its own rather than anywhere near the workdir, because the workdir holds
+    `plan-spec.json` and `verify-spec.json` — and those carry the build job's
+    one-time token. `pip install` runs the app's own setup code, so the one
+    writable thing it is given has to contain nothing of ours.
+
+    Named after the deployment, which is what the workdir is named after, so all
+    three passes of one deploy install into one place and pay for it once. A
+    volume rather than a directory on the host for a reason worth measuring:
+    `container.Volume` has the numbers.
     """
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(REPO_ROOT)
-    env["PYTHONUNBUFFERED"] = "1"
-    env.update(extra)
-    return env
+    return container.Volume(f"vd-deps-{Path(workdir).name}")
 
 
-async def launch(
-    argv: Sequence[str],
-    *,
-    env: Mapping[str, str],
-    log: Path,
-    cwd: Path = REPO_ROOT,
-    timeout: float = DEFAULT_TIMEOUT,
-) -> Outcome:
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "w", encoding="utf-8") as handle:
-        process = await asyncio.create_subprocess_exec(
-            *argv,
-            cwd=str(cwd),
-            env=dict(env),
-            stdout=handle,
-            stderr=asyncio.subprocess.STDOUT,
-        )
-        try:
-            returncode = await asyncio.wait_for(process.wait(), timeout)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            returncode = -1
-    return Outcome(returncode=returncode, log=log)
+async def discard_deps(workdir: Path) -> None:
+    """Throw away the packages a finished deployment installed.
+
+    Not kept as a cache between deploys. Two deploys of two different apps
+    sharing a directory that one app's `pip install` could write to would be a
+    channel from one customer's build into another's, and a cache shared by one
+    app's own deploys would make a build depend on what the last one left.
+    """
+    await container.remove_volume(deps_volume(workdir))
 
 
 def write_spec(path: Path, spec: Mapping[str, Any]) -> Path:
@@ -109,17 +109,65 @@ def write_spec(path: Path, spec: Mapping[str, Any]) -> Path:
     return path
 
 
-async def run_build_job(spec: Mapping[str, Any], *, workdir: Path) -> Outcome:
-    """Run one phase of `buildjob.run` and wait for it.
+async def ensure_build_image(config: ControlPlaneConfig, *, log: Path) -> None:
+    """The image an app's migrations run in, built if it is not current."""
+    await container.ensure_image(
+        tag=config.build_image,
+        dockerfile=BUILD_DOCKERFILE,
+        log=log,
+        failed=IMAGE_FAILED,
+    )
+
+
+async def run_build_job(
+    config: ControlPlaneConfig,
+    spec: Mapping[str, Any],
+    *,
+    workdir: Path,
+    labels: Mapping[str, str] | None = None,
+) -> Outcome:
+    """Run one phase of `buildjob.run`, in a container, and wait for it.
 
     Its verdict does not come back through this function. The build job reports
     home itself, over HTTP, with its one-time token (contract 7.4), because in
     the cloud it runs somewhere the worker cannot reach into. The exit code here
     only says whether it got that far.
+
+    `labels` go on both Docker resources this creates, the container and the
+    packages volume, so that a build killed halfway through leaves something
+    that can be traced to an app and a generation rather than two anonymous
+    objects in `docker ps -a`.
     """
-    spec_path = write_spec(workdir / f"{spec['phase']}-spec.json", spec)
-    return await launch(
-        [sys.executable, "-m", "buildjob.run", "--spec", str(spec_path)],
-        env=child_env(),
+    inside = {
+        **spec,
+        "repo_dir": REPO_IN_CONTAINER,
+        "deps_dir": DEPS_IN_CONTAINER,
+        "scratch_dsn": container.reachable_from_container(spec["scratch_dsn"]),
+        "callback_url": container.reachable_from_container(spec["callback_url"]),
+    }
+    spec_path = write_spec(workdir / f"{spec['phase']}-spec.json", inside)
+
+    await ensure_build_image(config, log=workdir / "image.log")
+    await container.ensure_volume(deps_volume(workdir), labels)
+    return await container.run(
+        image=config.build_image,
+        command=["python", "-m", "buildjob.run", "--spec", SPEC_IN_CONTAINER],
+        mounts={
+            # Our own code, mounted rather than copied in, so that editing the
+            # build job does not mean rebuilding the image. Read-only either
+            # way: the container has no business changing it.
+            REPO_ROOT / "buildjob": "/vd/src/buildjob",
+            REPO_ROOT / "kernel": "/vd/src/kernel",
+            # The app's checkout, also read-only, so app code cannot alter what
+            # the second pass is going to read.
+            Path(spec["repo_dir"]): REPO_IN_CONTAINER,
+            spec_path: SPEC_IN_CONTAINER,
+            # The one writable mount, holding nothing but the app's packages.
+            deps_volume(workdir): DEPS_IN_CONTAINER,
+        },
+        writable=[DEPS_IN_CONTAINER],
+        network=BUILD_NETWORK,
+        labels=labels,
         log=workdir / f"{spec['phase']}.log",
+        timeout=DEFAULT_TIMEOUT,
     )

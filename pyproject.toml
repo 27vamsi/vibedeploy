@@ -6,15 +6,23 @@ build-backend = "setuptools.build_meta"
 name = "vibedeploy"
 version = "0.5.0.dev0"
 requires-python = ">=3.12"
-dependencies = []
 
+# What our own three processes — control plane, worker, gateway — import. This
+# was empty for as long as the only way to run them was a developer's venv; a
+# container has nothing to install from, so the list that was implicit in
+# `dev` had to become the real one.
+#
 # Kept to what the landed milestones actually use. Add each milestone's
 # dependencies as it lands, not before.
-[project.optional-dependencies]
-dev = [
+#
+# Nothing here is a driver for the *app's* database beyond asyncpg: the
+# control plane reads its own schema with asyncpg and migrates it with an
+# async engine (`control_plane/migrations/env.py`), so there is deliberately
+# no psycopg2 in any of our processes. The synchronous drivers belong to the
+# images that run app code (`infra/local/buildjob`, `infra/local/apprt`),
+# because it is the app that chooses SQLAlchemy's default.
+dependencies = [
     "asyncpg>=0.30",
-    "pytest>=8.3",
-    "pytest-asyncio>=0.24",
     # M2 runs a real FastAPI + SQLAlchemy app through PgBouncer.
     "sqlalchemy[asyncio]>=2.0",
     "fastapi>=0.115",
@@ -30,10 +38,21 @@ dev = [
     "alembic>=1.14",
     "argon2-cffi>=23.1",
     "jinja2>=3.1",
+    # App secrets are envelope-encrypted at rest with AES-GCM
+    # (`control_plane/secrets.py`). It was an indirect dependency for a while,
+    # which is not the same as being installed.
+    "cryptography>=43.0",
     # M10's agent policy (contract 7.5) is YAML, read with safe_load only.
     "pyyaml>=6.0",
     # M13's MCP front door (section 21): Streamable HTTP, the official SDK.
     "mcp>=2.3",
+]
+
+[project.optional-dependencies]
+# Only what the suite needs and the product does not.
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
 ]
 
 # Listed explicitly; add each new top-level package as its milestone lands.

@@ -1,15 +1,27 @@
-# Local routing for the login gate. Readme.md section 8 M6.
+# Caddy's bootstrap, and deliberately nothing else. Readme.md section 16.
 #
-# Each deployed app is reachable at <app>.localhost and must only ever be
-# reachable through its sidecar, never directly. The sidecar listens on 8080
-# and is the only thing this file is allowed to point at.
+# There are no site blocks in here, and that is the point. An app's route is
+# written by the worker over the admin API below, from what the control plane's
+# database says is live — so a file on disk cannot be the source of truth for
+# where traffic goes without there being two answers to that question.
 #
-# Not wired to real apps yet; M6 fills in the per-app upstreams.
+# A Caddyfile with only a global options block produces a config with no `apps`
+# key at all, which is what lets `worker/runtimes/proxy.py` write a server of
+# its own without colliding with one this file created. That module has to make
+# the `apps.http.servers` path on its first write because of it: Caddy's admin
+# API does not create intermediate objects, and a POST straight at a server
+# under a missing `apps` answers 500 `invalid traversal path`.
+#
+# `admin 0.0.0.0:2019` because the admin API is reached from the host, and
+# inside the container `localhost` is the container. It is published on
+# `127.0.0.1:2019` only (see docker-compose.yml): this API can rewrite the whole
+# proxy configuration, so nothing outside this machine may reach it.
+#
+# `auto_https off` because `*.localhost` has no certificate anybody would
+# accept and nothing local needs TLS. The sidecar is told `VD_COOKIE_SECURE=0`
+# for the same reason.
 
 {
 	auto_https off
-}
-
-:80 {
-	respond "vibedeploy: no app matched this hostname" 404
+	admin 0.0.0.0:2019
 }

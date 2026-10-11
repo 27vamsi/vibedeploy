@@ -181,6 +181,13 @@ class App(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     subdomain: Mapped[str] = mapped_column(Text, nullable=False)
     repo: Mapped[str] = mapped_column(Text, nullable=False)
+    # Which branch a push has to be on to deploy itself (section 15). One ref,
+    # not "whatever was pushed": every topic branch redeploying production is
+    # not a feature, and a deploy nobody asked for is the kind a person is not
+    # watching.
+    tracked_ref: Mapped[str] = mapped_column(
+        Text, nullable=False, default="main", server_default="main"
+    )
     installation_id: Mapped[str | None] = mapped_column(Text)
     stack: Mapped[dict | None] = mapped_column(JSONB)
     protection: Mapped[str] = mapped_column(
@@ -192,6 +199,16 @@ class App(Base):
     # questions." This is where they are reused from.
     answers: Mapped[dict | None] = mapped_column(JSONB)
     live_deployment_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # The fence for everything outside this database. `jobs.fence` guards writes
+    # to a job row; this guards *the route*. It goes up once per deployment
+    # queued, the deployment carries the number it was queued under, and the one
+    # write that grants traffic names it in its `WHERE`. A worker holding an old
+    # number can still start a process — nothing can stop it — but it can never
+    # make that process the one requests go to. `control_plane/generations.py`
+    # makes the argument in full.
+    desired_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = _created()
 
 
@@ -206,7 +223,14 @@ class Deployment(Base):
     app_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey(f"{SCHEMA}.apps.id", ondelete="CASCADE"), nullable=False
     )
-    commit_sha: Mapped[str] = mapped_column(Text, nullable=False)
+    # What was asked for: a branch, a tag or a commit. A branch moves, so this
+    # is not what was built.
+    ref: Mapped[str] = mapped_column(Text, nullable=False)
+    # What was actually built, resolved by git at checkout time. Null until the
+    # clone succeeds, and null forever for a fixture tree, which has no commit.
+    # `verify` re-checks out this commit rather than the ref, so a push between
+    # confirming the rules and building them cannot slip past.
+    commit_sha: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
         Text, nullable=False, default=DeploymentStatus.queued.value
     )
@@ -225,6 +249,12 @@ class Deployment(Base):
     explanation: Mapped[list | None] = mapped_column(JSONB)
     stack: Mapped[dict | None] = mapped_column(JSONB)
     endpoint: Mapped[str | None] = mapped_column(Text)
+    # The app's `desired_generation` at the moment this deployment was queued.
+    # Carried rather than re-read, because the whole point is to notice that it
+    # has moved on: a worker re-reading it would always agree with itself.
+    generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -311,12 +341,17 @@ class Job(Base):
     `waiting` is not a stalled job. It is the pause the whole milestone is
     about: the pipeline stops mid-flight because it does not know something,
     and only a builder's answer moves it on. Nothing guesses on their behalf.
+
+    SKIP LOCKED protects the *claim* and nothing after it: the row lock ends
+    when the claiming transaction commits, which `worker/main.py` does before
+    any work starts. What protects the rest of the run is the pair of columns
+    at the bottom — a lease, and a fence. `control_plane/jobs.py` says why.
     """
 
     __tablename__ = "jobs"
     __table_args__ = (
         _enum_check("status", JobStatus),
-        Index("ix_jobs_claim", "status", "run_after"),
+        Index("ix_jobs_claim", "status", "run_after", "lease_expires_at"),
     )
 
     id: Mapped[uuid.UUID] = _pk()
@@ -338,10 +373,52 @@ class Job(Base):
     )
     locked_by: Mapped[str | None] = mapped_column(Text)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the holder's claim stops meaning anything. Renewed by a heartbeat
+    # while the worker is alive; null whenever nobody holds the job, so a
+    # `waiting` job can never expire its way back onto the queue.
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    # The fencing token. Bumped by every claim and never reset, so the number a
+    # worker was given at claim time is proof it is still the holder. Every
+    # write a worker makes to its own job names it, which is how a worker that
+    # was declared dead and isn't finds out: its UPDATE matches no rows.
+    fence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = _created()
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class WebhookDelivery(Base):
+    """One delivery from GitHub, and what it turned out to mean.
+
+    The unique index is not bookkeeping, it is the mechanism: GitHub retries,
+    and the INSERT of this row is what makes the second attempt a no-op. A
+    handler that looked for an existing row and then inserted one would lose a
+    race with its own retry, and the losing case is two builds of one commit.
+
+    Rows are kept for deliveries that did nothing as well, because "why did my
+    push not deploy?" needs an answer, and `outcome` plus `detail` are it.
+    """
+
+    __tablename__ = "webhook_deliveries"
+    __table_args__ = (
+        UniqueConstraint("source", "delivery_id", name="uq_webhook_deliveries_id"),
+    )
+
+    id: Mapped[uuid.UUID] = _pk()
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="github")
+    delivery_id: Mapped[str] = mapped_column(Text, nullable=False)
+    event: Mapped[str] = mapped_column(Text, nullable=False)
+    ref: Mapped[str | None] = mapped_column(Text)
+    head_sha: Mapped[str | None] = mapped_column(Text)
+    outcome: Mapped[str | None] = mapped_column(Text)
+    detail: Mapped[str | None] = mapped_column(Text)
+    # Which deployments this delivery started, if any. A list because one repo
+    # can back more than one app, and then one push really is two deployments.
+    deployments: Mapped[list | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = _created()
 
 
 class BuildToken(Base):

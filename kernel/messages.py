@@ -98,6 +98,12 @@ MESSAGES: dict[str, str] = {
         "`{table}` is not in the access model, so nobody has decided who may"
         " see it."
     ),
+    "bookkeeping_open": (
+        "`{table}` is the migration tool's own record of what it has run. It"
+        " holds no data of yours, so it is left out of the access model — but"
+        " `{role}` can still reach it ({reason}), and anything in this schema"
+        " the app can reach has to have been shut deliberately."
+    ),
     # -- the suite could not be trusted to have run at all -------------------
     "no_protected_tables": (
         "The attack suite found nothing to attack, so it proves nothing."

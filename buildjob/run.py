@@ -40,6 +40,7 @@ from typing import Any, Mapping
 import asyncpg
 import httpx
 
+from buildjob import deps, migrate_alembic
 from buildjob.attack import Check, Report
 from buildjob.attack import run as run_attack
 from buildjob.derive import Answers, derive
@@ -71,8 +72,17 @@ NO_ANSWERS = (
     " access model to enforce."
 )
 UNSUPPORTED_MIGRATIONS = (
-    "Only a folder of plain `.sql` migrations can be run by this build job."
-    " Alembic support arrives with the containerised build."
+    "This build job can run a folder of plain `.sql` migrations or an Alembic"
+    " project, and found neither. It was told the migrations are `{kind}`."
+)
+# An app's own packages have to be installed by running setup code we have never
+# read, from an index we do not control, so the only process allowed to do it is
+# this one. There is nowhere safe to put the result unless we were given a
+# directory for it, and guessing one would mean writing into either the
+# read-only checkout or the directory holding our own one-time token.
+NO_DEPS_DIR = (
+    "This app's dependencies have to be installed, and this build job was not"
+    " given anywhere to put them, so nothing was run."
 )
 
 
@@ -95,6 +105,9 @@ class BuildSpec:
     scratch_dsn: str
     callback_url: str
     job_token: str
+    # Where the app's own packages may be written. A directory of its own, with
+    # nothing of ours in it: `buildjob/deps.py` explains why.
+    deps_dir: Path | None = None
     answers: dict[str, Any] | None = None
     access_model: dict[str, Any] | None = None
     stack: dict[str, Any] | None = None
@@ -112,6 +125,7 @@ class BuildSpec:
             scratch_dsn=raw["scratch_dsn"],
             callback_url=raw["callback_url"],
             job_token=raw["job_token"],
+            deps_dir=Path(raw["deps_dir"]) if raw.get("deps_dir") else None,
             answers=raw.get("answers"),
             access_model=raw.get("access_model"),
             stack=raw.get("stack"),
@@ -139,24 +153,86 @@ async def scratch_app(spec: BuildSpec):
             await admin.close()
 
 
+async def install_deps(spec: BuildSpec) -> None:
+    """Install what the app imports, before anything tries to import it.
+
+    This runs for **every** app, not only the Alembic ones that need the
+    packages in order to migrate at all. The volume it fills is the same volume
+    the serving container puts on its `PYTHONPATH`, and a running app needs
+    `fastapi` whether its migrations are spelled in Python or in `.sql`. Before
+    the app ran in a container it happened to find the worker's own packages
+    instead, which is to say it worked by accident.
+
+    An app that declares nothing is not refused: `deps.requirements` returns
+    `None`, there is nothing to install, and an import that then fails names
+    itself in the app's log.
+    """
+    if deps.requirements(spec.repo_dir) is None:
+        return
+    if spec.deps_dir is None:
+        raise BuildFailure(NO_DEPS_DIR)
+    try:
+        await asyncio.to_thread(deps.install, spec.repo_dir, spec.deps_dir)
+    except deps.DependencyError as exc:
+        raise BuildFailure(str(exc)) from exc
+
+
 async def migrate(spec: BuildSpec, roles: AppRoles) -> None:
     """Run the app's own migrations, as the migrator, in the throwaway schema.
 
     This is the untrusted step. It is why this file is a separate process.
     """
-    if spec.migrations_kind != "sql":
-        raise BuildFailure(UNSUPPORTED_MIGRATIONS)
+    await install_deps(spec)
+    dsn = dsn_as(spec.scratch_dsn, roles.migrator, roles.migrator_password)
+    if spec.migrations_kind == "sql":
+        await _migrate_sql(spec, dsn)
+    elif spec.migrations_kind == "alembic":
+        await _migrate_alembic(spec, dsn)
+    else:
+        raise BuildFailure(
+            UNSUPPORTED_MIGRATIONS.format(kind=spec.migrations_kind)
+        )
 
+
+async def _migrate_sql(spec: BuildSpec, dsn: str) -> None:
     source = spec.repo_dir / spec.migrations_path
-    conn = await asyncpg.connect(
-        dsn_as(spec.scratch_dsn, roles.migrator, roles.migrator_password)
-    )
+    conn = await asyncpg.connect(dsn)
     try:
         await apply_sql_migrations(conn, source)
     except MigrationError as exc:
         raise BuildFailure(f"The app's migrations did not run: {exc}") from exc
     finally:
         await conn.close()
+
+
+async def _migrate_alembic(spec: BuildSpec, dsn: str) -> None:
+    """Run the app's own Alembic, against packages `install_deps` already put
+    on the path.
+
+    The directory is required here even when the app declares no dependencies,
+    because this is the path that *imports the app*: a project whose `env.py`
+    imports its models has somewhere to resolve them from, or it does not run.
+
+    Which schema it lands in is not passed and not negotiable: the migrator
+    role carries `search_path = <schema>` from `roles.sql`, so an `env.py` that
+    builds its own engine out of the URL we gave it still arrives in the right
+    place, and one that reaches for `public` finds nothing it may write to.
+
+    On a thread, because Alembic is synchronous and the app's `env.py` may do
+    anything at all, including block.
+    """
+    if spec.deps_dir is None:
+        raise BuildFailure(NO_DEPS_DIR)
+
+    try:
+        await asyncio.to_thread(
+            migrate_alembic.upgrade,
+            dsn=dsn,
+            repo_dir=spec.repo_dir,
+            migrations_path=spec.migrations_path,
+        )
+    except migrate_alembic.AlembicError as exc:
+        raise BuildFailure(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------

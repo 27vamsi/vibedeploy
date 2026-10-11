@@ -1,0 +1,242 @@
+# One Linux host, everything on it. Readme.md sections 5 and 16.
+#
+# Read `env.example` first: this file deliberately has no defaults for anything
+# that matters, so a stack brought up without an `.env` beside it fails to
+# interpolate rather than coming up with a password that is in the repository.
+#
+#   cp env.example .env && $EDITOR .env
+#   docker compose -f infra/prod/docker-compose.yml up -d --build
+#
+# `.env` is read twice and that is intentional: once by compose, for the
+# `${...}` below, and once by each container, as its environment. One file, so
+# the paths the host mounts and the paths the processes are told about cannot
+# disagree.
+#
+# **What is published to the internet is three ports and no more**: 80 and 443
+# on Caddy, and nothing else anywhere. Postgres, the throwaway build database,
+# Caddy's admin API, the console and the gateway all answer on the compose
+# network only. That is asserted here rather than described in the runbook,
+# because a `ports:` line is the only form of that claim anybody can check.
+#
+# The trust boundary, stated once: **the worker has the Docker socket.** It
+# needs it — it starts the build job that runs app migrations and the two
+# containers every app serves from — and a process that can ask the host's
+# daemon for a container can ask for a privileged one. So the worker is
+# root-equivalent on this host whatever uid it runs under, and the isolation
+# between apps is defence in depth rather than a sandbox. The enforcement that
+# the product actually rests on is in Postgres (section 3), which is why that
+# is where it was put.
+
+name: vibedeploy
+
+# Our three processes are one image and one set of mounts, differing only in
+# the command. The mounts are the interesting part:
+#
+#   - the repository at the path it already has, read-only, because the worker
+#     hands paths under it to the *host's* daemon as bind mounts and they have
+#     to mean the same thing on both sides;
+#   - the state root likewise, writable, because the deployment checkouts the
+#     app containers mount live in it.
+#
+# `infra/prod/Dockerfile` explains why nothing is copied in.
+x-platform: &platform
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: vibedeploy/platform:prod
+  env_file:
+    - .env
+  working_dir: ${VD_ROOT}
+  environment:
+    PYTHONPATH: ${VD_ROOT}
+  volumes:
+    - ${VD_ROOT}:${VD_ROOT}:ro
+    - ${VD_STATE_ROOT}:${VD_STATE_ROOT}
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  # The customer database. Every app gets a schema and four roles in here, and
+  # the control plane's own tables are a separate database on the same
+  # instance.
+  #
+  # No `ports:`. On a laptop it is published so that `pytest` can reach it; on
+  # a box with a public address there is nothing outside this network that has
+  # any business connecting, and every process that does is in this file.
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${VD_PG_USER}
+      POSTGRES_PASSWORD: ${VD_PG_PASSWORD}
+      POSTGRES_DB: vibedeploy
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${VD_PG_USER} -d vibedeploy"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+
+  # The build job's throwaway, and a second instance rather than a second
+  # schema for the reason in `control_plane/config.py`: the build job runs an
+  # app's own migrations, so it is handed admin of whatever it is pointed at.
+  # Pointing it at the instance above would hand code we have never read admin
+  # of every other app's data.
+  #
+  # No volume, on purpose. A restart is a clean slate, which is what throwaway
+  # means, and nothing in here is ever read back.
+  buildpg:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${VD_BUILD_PG_USER}
+      POSTGRES_PASSWORD: ${VD_BUILD_PG_PASSWORD}
+      POSTGRES_DB: vibedeploy_build
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${VD_BUILD_PG_USER} -d vibedeploy_build"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # PgBouncer is deliberately absent, and the absence is worth a paragraph
+  # because `infra/local` has one.
+  #
+  # Nothing in the product dials it. An app's DSN is derived from
+  # `VD_APP_ADMIN_DSN` (`worker/pipeline/provision.py`), and that DSN is also
+  # what provisioning runs `CREATE ROLE` and `GRANT` over — which a transaction
+  # pooler is the wrong thing to be in front of. The pooler exists in the local
+  # stack so that `tests/concurrency` can prove the identity shim survives
+  # being handed a connection mid-session; it is a test fixture, not a
+  # component. Shipping it here with the local stack's `trust` server-side auth
+  # would be shipping a hole to pool connections nobody sends.
+
+  # The only thing on this box with a public address. Both halves of the
+  # product are reached through it: an app at `<subdomain>.${VD_APP_DOMAIN}`
+  # and the console at `${VD_CONSOLE_DOMAIN}`.
+  #
+  # Its route table is not in the Caddyfile and never was. It is written over
+  # the admin API from what the control plane's database says is live, which is
+  # what lets the reconciler re-assert it rather than trust it — and the admin
+  # API is reachable from this network only, because it can rewrite the whole
+  # configuration.
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      VD_ACME_EMAIL: ${VD_ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Named, and the one volume here that must survive: it holds the
+      # certificates and the ACME account key. Lose it and every restart is a
+      # fresh set of issuance requests against a rate limit.
+      - caddy_data:/data
+      - caddy_config:/config
+    healthcheck:
+      # The admin API, not 443: with no routes written yet there is nothing on
+      # 443 to answer, and "no apps are deployed" is not unhealthy.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  # The console and the API. Reached only through Caddy, which is why there is
+  # no `ports:` line: a second address for the console would be a second
+  # address with no TLS on it.
+  #
+  # `VD_MIGRATE_ON_BOOT` is set in `.env` and this is the process that honours
+  # it. Two containers starting together cannot race: `control_plane/migrate.py`
+  # holds a Postgres advisory lock across the whole upgrade.
+  control-plane:
+    <<: *platform
+    command:
+      - python
+      - -m
+      - uvicorn
+      - control_plane.app:create_app
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8100"
+    healthcheck:
+      # Answers for the database, not just for the process — so a restart
+      # policy and this line mean something. See `control_plane/app.py`.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request;urllib.request.urlopen("http://127.0.0.1:8100/health")
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 60s
+
+  # The agent gateway (section 21). A second process rather than a second
+  # router in the first one because of what each may read: this one holds
+  # `vd/apps/*/agent-*` and the console holds none of it.
+  gateway:
+    <<: *platform
+    command:
+      - python
+      - -m
+      - uvicorn
+      - gateway.app:build
+      - --factory
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8200"
+
+  # The job queue and the reconciler, in one process with two loops.
+  #
+  # Three things make this service different from the two above, and all three
+  # are the same fact: it is the half that starts containers.
+  worker:
+    <<: *platform
+    # The socket is root-owned and group `docker`, whose gid differs between
+    # hosts — so it is named in `.env` rather than guessed in the image. This
+    # is why the worker is not simply run as root: all three of our processes
+    # write into the state root, and one of them doing it as root would leave
+    # files the other two cannot read.
+    #
+    # It is not a privilege boundary and is not claimed as one. A process that
+    # can reach that socket can ask for a privileged container, so this is
+    # about file ownership, not about containment. The boundary that the
+    # product rests on is stated at the top of this file.
+    group_add:
+      - ${VD_DOCKER_GID}
+    volumes:
+      - ${VD_ROOT}:${VD_ROOT}:ro
+      - ${VD_STATE_ROOT}:${VD_STATE_ROOT}
+      # The trust boundary. Nothing else in this file gets this line.
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      buildpg:
+        condition: service_healthy
+      caddy:
+        condition: service_healthy
+      # So that the schema exists before the queue is polled. The worker does
+      # not migrate: one process owning that is what the advisory lock is for.
+      control-plane:
+        condition: service_healthy
+    command:
+      - python
+      - -m
+      - worker.main
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

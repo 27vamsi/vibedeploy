@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest_asyncio
 
 from control_plane.models import DeploymentStatus, Protection
-from tests.pipeline.conftest import settle, sign_in
+from tests.pipeline.conftest import settle, sign_in, visit
 
 ALICE = ("alice@example.com", "alice-password-1")
 BOB = ("bob@example.com", "bob-password-2")
@@ -104,12 +104,8 @@ async def test_two_people_see_only_their_own_todos(pipeline, live):
 
 async def test_nobody_signed_in_sees_nothing(pipeline, live):
     """Fail closed: no identity is zero rows, never everything."""
-    import httpx
-
     endpoint = (await pipeline.deployment(live)).endpoint
-    async with httpx.AsyncClient(
-        base_url=endpoint, follow_redirects=False, timeout=20
-    ) as anonymous:
+    async with visit(endpoint, follow_redirects=False, timeout=20) as anonymous:
         response = await anonymous.get("/todos")
     # The gate never lets the request reach the app at all.
     assert response.status_code in (302, 303, 401)

@@ -24,8 +24,10 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from control_plane import service
-from control_plane.api.deps import get_session
+from control_plane import appenv, auth, service
+from control_plane.api.deps import get_config, get_session
+from control_plane.auth import Operator, require_operator
+from control_plane.config import ControlPlaneConfig
 from control_plane.gateway_client import GatewayClient, GatewayDown
 from control_plane.models import (
     AccessModel,
@@ -42,8 +44,18 @@ from control_plane.models import (
 )
 from control_plane.questions import BASE_QUESTIONS
 
-router = APIRouter(tags=["dashboard"])
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# Two routers, because "this page needs a login" has to be the default and not
+# something each handler remembers. Everything on `router` is behind
+# `require_operator`; `public` holds only the three pages a person who is not
+# logged in is allowed to see, and each of them is named here in one place
+# where it can be read and checked against.
+router = APIRouter(tags=["dashboard"], dependencies=[Depends(require_operator)])
+public = APIRouter(tags=["login"])
+
+Session = Annotated[AsyncSession, Depends(get_session)]
+Me = Annotated[Operator, Depends(require_operator)]
 
 
 def _redirect(url: str) -> RedirectResponse:
@@ -51,18 +63,18 @@ def _redirect(url: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=303)
 
 
-async def _sole_builder(session: AsyncSession) -> Builder:
-    """V0.5 has one builder per installation and no sign-up flow yet.
+def _page(request: Request, name: str, context: dict[str, Any]) -> Any:
+    """Render, with the session's CSRF token always in scope.
 
-    Isolated here rather than spread through the handlers, so that adding real
-    builder sessions later touches one function.
+    Injected here rather than passed by each handler: a template that forgets
+    it renders a form that is refused, and a handler that forgets it would be a
+    page that silently stops working. One place to add it is one place to get
+    it wrong.
     """
-    builder = (await session.execute(select(Builder).limit(1))).scalar_one_or_none()
-    if builder is None:
-        builder = await service.create_builder(
-            session, email="builder@localhost", password=uuid.uuid4().hex
-        )
-    return builder
+    me = getattr(request.state, "operator", None)
+    return templates.TemplateResponse(
+        request, name, {"csrf": me.csrf if me else "", "me": me, **context}
+    )
 
 
 async def _app_or_404(session: AsyncSession, app_id: str) -> App:
@@ -81,21 +93,131 @@ async def _deployment_or_404(session: AsyncSession, deployment_id: uuid.UUID) ->
     return deployment
 
 
-@router.get("/", response_class=HTMLResponse)
-async def index(
-    request: Request, session: Annotated[AsyncSession, Depends(get_session)]
+# ---------------------------------------------------------------------------
+# Getting in.
+#
+# These are the only pages a stranger may see, and they are on `public` for
+# exactly that reason: the guard is a property of the router, so a new handler
+# is private unless somebody deliberately puts it here.
+# ---------------------------------------------------------------------------
+
+
+def _safe_next(value: str | None) -> str:
+    # Only a path. `?next=https://elsewhere` on a login page is an open
+    # redirect that arrives wearing our own hostname, which is the shape every
+    # credential-phishing link wants.
+    if not value or not value.startswith("/") or value.startswith("//"):
+        return "/"
+    return value
+
+
+@public.get("/login", response_class=HTMLResponse)
+async def login_page(
+    request: Request, session: Session, next: str | None = None, said: str | None = None
 ) -> Any:
+    if await auth.sole_builder(session) is None:
+        return _redirect("/setup")
+    return templates.TemplateResponse(
+        request, "login.html", {"next": _safe_next(next), "said": said}
+    )
+
+
+@public.post("/login")
+async def login(
+    request: Request,
+    session: Session,
+    email: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+    next: Annotated[str, Form()] = "/",
+) -> Any:
+    """One answer for every failure, and a throttle in front of it.
+
+    "No such operator" and "wrong password" are the same sentence on purpose:
+    told apart, this page enumerates who may log in. The throttle is keyed by
+    the email typed rather than by the address it came from, because the
+    address is the attacker's to choose and the account is not.
+    """
+    sessions = auth.sessions(request)
+    who = email.strip().lower()
+    if sessions.too_many(who):
+        raise HTTPException(status_code=429, detail="too many attempts; wait a minute")
+
+    builder = await auth.check_password(session, email=who, password=password)
+    if builder is None:
+        sessions.record_attempt(who)
+        said = quote("that is not a login here")
+        return _redirect(f"/login?next={quote(_safe_next(next))}&said={said}")
+
+    sessions.forget(who)
+    response = _redirect(_safe_next(next))
+    sessions.issue(response, builder)
+    return response
+
+
+@public.get("/setup", response_class=HTMLResponse)
+async def setup_page(request: Request, session: Session) -> Any:
+    """Open exactly once per installation, and closed by the row it creates.
+
+    Closed by "a builder exists" rather than by a flag, so there is no state to
+    get out of step with reality and no way to reopen it except by deleting the
+    operator — which is a thing you would do deliberately, in the database.
+    """
+    if await auth.sole_builder(session) is not None:
+        raise HTTPException(status_code=404, detail="this installation is set up")
+    return templates.TemplateResponse(request, "setup.html", {"said": None})
+
+
+@public.post("/setup")
+async def setup(
+    request: Request,
+    session: Session,
+    email: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+) -> Any:
+    if await auth.sole_builder(session) is not None:
+        # Not 404: a second person arriving here at the same moment as the
+        # first is a race, not a wrong URL, and should be told which it was.
+        raise HTTPException(status_code=409, detail="somebody already set this up")
+    if len(password) < 12:
+        return templates.TemplateResponse(
+            request,
+            "setup.html",
+            {"said": "that password is too short — twelve characters at least"},
+        )
+    builder = await service.create_builder(session, email=email, password=password)
+    await session.commit()
+    response = _redirect("/")
+    auth.sessions(request).issue(response, builder)
+    return response
+
+
+@router.post("/logout")
+async def logout(request: Request) -> Any:
+    response = _redirect("/login")
+    auth.sessions(request).clear(response)
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Everything below here needs an operator.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/", response_class=HTMLResponse)
+async def index(request: Request, session: Session) -> Any:
     apps = (await session.execute(select(App).order_by(App.created_at))).scalars().all()
-    return templates.TemplateResponse(request, "apps.html", {"apps": apps})
+    return _page(request, "apps.html", {"apps": apps})
 
 
 @router.post("/apps")
 async def create_app(
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
+    me: Me,
     name: Annotated[str, Form()],
     repo: Annotated[str, Form()],
 ) -> Any:
-    builder = await _sole_builder(session)
+    builder = await session.get(Builder, me.builder_id)
+    assert builder is not None  # require_operator already looked it up
     app = await service.create_app(session, builder=builder, name=name, repo=repo)
     # Committed before the redirect, because the browser follows it straight to
     # a page that has to find this row.
@@ -107,7 +229,8 @@ async def create_app(
 async def app_page(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
+    config: Annotated[ControlPlaneConfig, Depends(get_config)],
 ) -> Any:
     app = await _app_or_404(session, app_id)
     deployments = (
@@ -130,7 +253,7 @@ async def app_page(
         .scalars()
         .all()
     )
-    return templates.TemplateResponse(
+    return _page(
         request,
         "app.html",
         {
@@ -139,16 +262,41 @@ async def app_page(
             "users": users,
             "questions": BASE_QUESTIONS,
             "answers": app.answers or {},
+            # Names only. A page that prints a Stripe key is a page that leaks
+            # one over a shoulder, and there is nothing a builder can do here
+            # that needs to see the value again.
+            "env_names": sorted(service.app_env(config, app_id)),
+            "env_error": request.query_params.get("env_error"),
         },
     )
+
+
+@router.post("/apps/{app_id}/env")
+async def set_env(
+    app_id: str,
+    session: Session,
+    config: Annotated[ControlPlaneConfig, Depends(get_config)],
+    env: Annotated[str, Form()],
+) -> Any:
+    """The settings the app's `.env` would have held, pasted in the same shape.
+
+    A refusal comes back on the page in words, because the names this turns down
+    are exactly the ones a builder would otherwise keep retrying.
+    """
+    await _app_or_404(session, app_id)
+    try:
+        service.set_app_env(config, app_id, appenv.parse(env))
+    except appenv.InvalidEnv as refused:
+        return _redirect(f"/apps/{app_id}?env_error={quote(str(refused))}")
+    return _redirect(f"/apps/{app_id}")
 
 
 @router.post("/apps/{app_id}/deploy")
 async def deploy(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    commit_sha: Annotated[str, Form()],
+    session: Session,
+    ref: Annotated[str, Form()],
 ) -> Any:
     app = await _app_or_404(session, app_id)
     form = await request.form()
@@ -161,7 +309,7 @@ async def deploy(
 
     try:
         deployment = await service.start_deployment(
-            session, app=app, commit_sha=commit_sha, answers=answers
+            session, app=app, ref=ref, answers=answers
         )
     except service.ServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -173,7 +321,7 @@ async def deploy(
 async def deployment_page(
     request: Request,
     deployment_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
 ) -> Any:
     deployment = await _deployment_or_404(session, deployment_id)
     app = await session.get(App, deployment.app_id)
@@ -193,7 +341,7 @@ async def deployment_page(
         .scalars()
         .all()
     )
-    return templates.TemplateResponse(
+    return _page(
         request,
         "deployment.html",
         {
@@ -210,7 +358,7 @@ async def deployment_page(
 async def answer(
     request: Request,
     deployment_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
 ) -> Any:
     deployment = await _deployment_or_404(session, deployment_id)
     form = await request.form()
@@ -220,7 +368,7 @@ async def answer(
     answers = {
         str(key): str(value)
         for key, value in form.items()
-        if str(key) not in ("csrf", "commit_sha") and value
+        if str(key) not in ("csrf", "ref") and value
     }
     if not answers:
         raise HTTPException(status_code=400, detail="nothing was answered")
@@ -237,13 +385,19 @@ async def answer(
 @router.post("/deployments/{deployment_id}/confirm")
 async def confirm(
     deployment_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
+    me: Me,
 ) -> Any:
+    """`confirmed_by` is now the person who clicked, not a placeholder.
+
+    The column was always there and always held `builder@localhost`, which made
+    the record useless as evidence: "somebody confirmed this" is not what an
+    access model's sign-off is for.
+    """
     deployment = await _deployment_or_404(session, deployment_id)
-    builder = await _sole_builder(session)
     try:
         await service.confirm_model(
-            session, deployment=deployment, confirmed_by=builder.email
+            session, deployment=deployment, confirmed_by=me.email
         )
     except service.ServiceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -254,7 +408,7 @@ async def confirm(
 @router.post("/apps/{app_id}/users")
 async def add_user(
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
     role: Annotated[str, Form()] = "member",
@@ -314,7 +468,7 @@ async def _agents_page(
         .all()
     )
     people = {person.id: person for person in await _people(session, app)}
-    return templates.TemplateResponse(
+    return _page(
         request,
         "agents.html",
         {
@@ -333,7 +487,7 @@ async def _agents_page(
 async def agents_page(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
 ) -> Any:
     return await _agents_page(request, session, await _app_or_404(session, app_id))
 
@@ -342,7 +496,8 @@ async def agents_page(
 async def create_agent(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
+    me: Me,
     name: Annotated[str, Form()],
     acts_for: Annotated[uuid.UUID, Form()],
     policy_yaml: Annotated[str, Form()],
@@ -358,14 +513,13 @@ async def create_agent(
     person = await session.get(AppUser, acts_for)
     if person is None or person.app_id != app.id:
         raise HTTPException(status_code=404, detail="no such person")
-    builder = await _sole_builder(session)
     try:
         agent, key = await service.create_agent(
             session,
             app=app,
             name=name,
             acts_for=person,
-            created_by=builder.email,
+            created_by=me.email,
             policy_yaml=policy_yaml,
             high_risk_ack=high_risk_ack,
         )
@@ -382,7 +536,7 @@ async def agent_page(
     request: Request,
     app_id: str,
     agent_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     refused: str | None = None,
 ) -> Any:
     app = await _app_or_404(session, app_id)
@@ -398,7 +552,7 @@ async def agent_page(
         .scalars()
         .all()
     )
-    return templates.TemplateResponse(
+    return _page(
         request,
         "agent.html",
         {
@@ -420,19 +574,19 @@ async def agent_page(
 async def save_policy(
     app_id: str,
     agent_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
+    me: Me,
     policy_yaml: Annotated[str, Form()],
     high_risk_ack: Annotated[bool, Form()] = False,
 ) -> Any:
     app = await _app_or_404(session, app_id)
     agent = await _agent_or_404(session, app, agent_id)
-    builder = await _sole_builder(session)
     try:
         await service.save_policy(
             session,
             agent=agent,
             policy_yaml=policy_yaml,
-            author=builder.email,
+            author=me.email,
             high_risk_ack=high_risk_ack,
         )
     except service.ServiceError as exc:
@@ -449,7 +603,7 @@ async def save_policy(
 async def revoke_agent(
     app_id: str,
     agent_id: uuid.UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
 ) -> Any:
     app = await _app_or_404(session, app_id)
     agent = await _agent_or_404(session, app, agent_id)
@@ -461,7 +615,7 @@ async def revoke_agent(
 @router.post("/apps/{app_id}/agents-enabled")
 async def set_app_agents(
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     on: Annotated[bool, Form()],
 ) -> Any:
     app = await _app_or_404(session, app_id)
@@ -472,7 +626,7 @@ async def set_app_agents(
 
 @router.post("/kill-switch")
 async def kill_switch(
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     on: Annotated[bool, Form()],
     back: Annotated[str, Form()] = "/",
 ) -> Any:
@@ -524,7 +678,7 @@ async def _names(session: AsyncSession, app: App) -> dict[str, str]:
 async def approvals_page(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     said: str | None = None,
 ) -> Any:
     app = await _app_or_404(session, app_id)
@@ -534,7 +688,7 @@ async def approvals_page(
         waiting = await _gateway(request).pending(app.id)
     except GatewayDown as exc:
         unavailable = str(exc)
-    return templates.TemplateResponse(
+    return _page(
         request,
         "approvals.html",
         {
@@ -556,7 +710,7 @@ async def decide(
     app_id: str,
     action_id: str,
     verdict: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     approver: Annotated[str, Form()],
     back: Annotated[str, Form()] = "",
 ) -> Any:
@@ -583,7 +737,7 @@ async def decide(
 async def activity_page(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     said: str | None = None,
 ) -> Any:
     app = await _app_or_404(session, app_id)
@@ -593,7 +747,7 @@ async def activity_page(
         rows = await _gateway(request).activity(app.id)
     except GatewayDown as exc:
         unavailable = str(exc)
-    return templates.TemplateResponse(
+    return _page(
         request,
         "activity.html",
         {
@@ -615,9 +769,7 @@ async def audit_page(request: Request) -> Any:
         chain = await _gateway(request).audit()
     except GatewayDown as exc:
         unavailable = str(exc)
-    return templates.TemplateResponse(
-        request, "audit.html", {"chain": chain, "unavailable": unavailable}
-    )
+    return _page(request, "audit.html", {"chain": chain, "unavailable": unavailable})
 
 
 def _when(value: str | None) -> datetime | None:
@@ -633,7 +785,7 @@ def _when(value: str | None) -> datetime | None:
 async def evidence_page(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     since: str | None = None,
     until: str | None = None,
 ) -> Any:
@@ -646,7 +798,7 @@ async def evidence_page(
         )
     except GatewayDown as exc:
         unavailable = str(exc)
-    return templates.TemplateResponse(
+    return _page(
         request,
         "evidence.html",
         {
@@ -663,7 +815,7 @@ async def evidence_page(
 async def evidence_json(
     request: Request,
     app_id: str,
-    session: Annotated[AsyncSession, Depends(get_session)],
+    session: Session,
     since: str | None = None,
     until: str | None = None,
 ) -> Any:

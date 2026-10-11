@@ -123,6 +123,10 @@ async def wire(gateway_admin, root, *, control_url, policy, fixture="crm_chain")
         database_url=control_url,
         app_admin_dsn=DEFAULT_APP_DSN,
         sidecar_api_key=_secrets.token_hex(16),
+        session_secret=_secrets.token_hex(32),
+        # A real key, so the gateway tests read their agent credentials back
+        # through the envelope rather than past it.
+        secret_key=_secrets.token_hex(32),
         state_root=root / "state",
         public_url="http://127.0.0.1:0",
     )
@@ -132,7 +136,7 @@ async def wire(gateway_admin, root, *, control_url, policy, fixture="crm_chain")
     await empty(engine)
 
     async with build(gateway_admin, fixture) as app:
-        store = SecretStore(config.state_root / "secrets")
+        store = SecretStore(config.state_root / "secrets", key=config.secret_key)
         store.put(
             secret_name(app.roles.schema, AGENT),
             {
@@ -145,7 +149,9 @@ async def wire(gateway_admin, root, *, control_url, policy, fixture="crm_chain")
             ids = await register(session, app, policy)
 
         gateway = Gateway(
-            sessionmaker=sessions, secrets_root=config.state_root / "secrets"
+            sessionmaker=sessions,
+            secrets_root=config.state_root / "secrets",
+            secret_key=config.secret_key,
         )
         yield Wired(app=app, gateway=gateway, sessions=sessions, **ids)
     await engine.dispose()
@@ -193,7 +199,7 @@ async def register(session, app, policy):
 
     deployment = Deployment(
         app_id=row.id,
-        commit_sha="main",
+        ref="main",
         status=DeploymentStatus.live.value,
         schema_graph=app.graph,
     )

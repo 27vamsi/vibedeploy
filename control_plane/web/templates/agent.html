@@ -28,6 +28,7 @@
    that decided it. Editing a policy cannot change the answer to "why was this
    allowed?" about something that already happened. #}
 <form method="post" action="/apps/{{ app.app_id }}/agents/{{ agent.id }}/policy">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>
     <textarea name="policy_yaml" rows="16" cols="70" required>{{ latest.policy_yaml if latest else "" }}</textarea>
   </label>
@@ -61,6 +62,7 @@
   key, ends its sessions, and cancels anything of its that was waiting for a
   person.</p>
 <form method="post" action="/apps/{{ app.app_id }}/agents/{{ agent.id }}/revoke">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
   <button type="submit">Revoke {{ agent.name }}</button>
 </form>
 {% endif %}

@@ -21,6 +21,7 @@
    found in a hurry. #}
 <h2>Switches</h2>
 <form method="post" action="/apps/{{ app.app_id }}/agents-enabled">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="on" value="{{ "false" if app.agents_enabled else "true" }}">
   <p>
     Agents on this app are
@@ -29,6 +30,7 @@
   </p>
 </form>
 <form method="post" action="/kill-switch">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
   <input type="hidden" name="on" value="{{ "false" if kill_switch else "true" }}">
   <input type="hidden" name="back" value="/apps/{{ app.app_id }}/agents">
   <p>
@@ -57,6 +59,7 @@
 <h2>Add an agent</h2>
 {% if all_people %}
 <form method="post" action="/apps/{{ app.app_id }}/agents">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>Name <input name="name" required></label>
   {# An agent works for exactly one person, and that is the identity the
      gateway sets on every transaction it opens. #}

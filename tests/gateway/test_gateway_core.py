@@ -276,6 +276,10 @@ async def test_too_many_calls_a_minute_are_refused(wired):
     slow = Gateway(
         sessionmaker=wired.sessions,
         secrets_root=wired.gateway._store.root,
+        # The same key, because the store fails closed: a second gateway
+        # without it cannot read the agent credentials at all, and every call
+        # would be denied for the wrong reason.
+        secret_key=wired.gateway._store.key,
         limiter=RateLimiter(),
     )
     session_id = await wired.session_id()

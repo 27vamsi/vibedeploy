@@ -1,0 +1,35 @@
+# Caddy's bootstrap on a real box. Readme.md section 16.
+#
+# Still no site blocks, and for the same reason as `infra/local/Caddyfile`: an
+# app's route is written by the worker over the admin API, from what the
+# control plane's database says is live. A site block here would be a second
+# answer to "where does traffic go", and the reconciler could not re-assert the
+# first one without fighting it.
+#
+# The console is routed the same way (`worker/runtimes/proxy.py`'s console
+# route) rather than being given a site block here, because two servers cannot
+# share `:443` — and because it means a proxy that came up empty gets the route
+# to the console restated by the same reconcile pass that restates the apps.
+#
+# What differs from local is only the two lines below.
+#
+# `auto_https` is left at its default, which is on. There are no site blocks to
+# derive hostnames from, so nothing is certificated by *this* file: Caddy gets
+# a certificate for an app when the worker writes that app's route, because the
+# `host` matcher in the written route is what names the hostname and the server
+# it is written onto listens on 443. That is why `VD_PUBLIC_SCHEME=https` has
+# to be set before the first deploy rather than after.
+#
+# `admin 0.0.0.0:2019` because the API is reached from the worker's container,
+# and inside this one `localhost` is Caddy. It is deliberately **not published
+# to the host** in `docker-compose.yml`: this API can rewrite the entire proxy
+# configuration, so it is reachable from the compose network and nowhere else.
+
+{
+	admin 0.0.0.0:2019
+
+	# Where Let's Encrypt sends expiry warnings. Not optional in practice: an
+	# ACME account with no contact is how a renewal failure becomes an outage
+	# nobody was told about.
+	email {$VD_ACME_EMAIL}
+}

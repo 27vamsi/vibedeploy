@@ -74,10 +74,24 @@ class AppRoles:
         """The roles that policies are written against."""
         return (self.runtime, self.agent)
 
+    @property
+    def ledger(self) -> str:
+        """A schema for the platform's own notes about this app.
+
+        Deliberately not `schema`: everything in there is introspected, given a
+        policy and attacked, so a bookkeeping table would need either a policy
+        it has no business having or an exception in the verifier — and an
+        exception by name is a table an app could create in order to hide in.
+        Neither the runtime nor the agent role is granted USAGE here, so
+        nothing in it is reachable from the app at all.
+        """
+        return f"{self.schema}_vd"
+
 
 def _idents(roles: AppRoles) -> dict[str, str]:
     return {
         "schema": quote_ident(roles.schema),
+        "ledger": quote_ident(roles.ledger),
         "owner": quote_ident(roles.owner),
         "migrator": quote_ident(roles.migrator),
         "runtime": quote_ident(roles.runtime),
@@ -284,6 +298,7 @@ async def grant_app_roles(
 async def drop_app_roles(conn: asyncpg.Connection, roles: AppRoles) -> None:
     """Tear-down for scratch databases and test fixtures. Idempotent."""
     await conn.execute(f"DROP SCHEMA IF EXISTS {quote_ident(roles.schema)} CASCADE")
+    await conn.execute(f"DROP SCHEMA IF EXISTS {quote_ident(roles.ledger)} CASCADE")
     for name in (roles.agent, roles.runtime, roles.migrator, roles.owner):
         if await conn.fetchval("SELECT 1 FROM pg_roles WHERE rolname = $1", name):
             await conn.execute(f"DROP OWNED BY {quote_ident(name)} CASCADE")

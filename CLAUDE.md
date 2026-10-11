@@ -68,5 +68,12 @@ migrator secrets; UPDATE or DELETE on `audit_log`; deleting a test to make CI gr
 ## Local dev
 
 - Run `.venv/Scripts/python.exe -m pytest -q` from the repo root (the venv is not auto-activated).
-- Needs Docker Desktop: `docker compose -f infra/local/docker-compose.yml up -d postgres pgbouncer`.
-  Postgres on `127.0.0.1:55432`, PgBouncer (transaction mode) on `127.0.0.1:56432`.
+- Needs Docker Desktop, both for the stack and because an app's own migrations only ever run
+  in a container — with no `docker` a deploy blocks, it does not fall back to a subprocess.
+  `docker compose -f infra/local/docker-compose.yml up -d`.
+  Postgres `127.0.0.1:55432`, PgBouncer (transaction mode) `127.0.0.1:55433`, and `buildpg`
+  `127.0.0.1:55434` — the build job's throwaway instance, which no app ever lives in.
+- Caddy is part of that stack, not optional: apps are published at
+  `http://<subdomain>.localhost:55080` and nowhere else, so a deploy with no proxy blocks
+  rather than handing out a port. Its admin API is `127.0.0.1:55019` and the route table is
+  written there from the database, never from the `Caddyfile`.

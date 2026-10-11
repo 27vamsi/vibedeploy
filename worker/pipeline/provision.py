@@ -21,7 +21,6 @@ from __future__ import annotations
 import dataclasses
 import json
 import secrets as _secrets
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -32,7 +31,7 @@ from buildjob.attack import structural
 from buildjob.introspect import introspect, schema_hash
 from buildjob.policies import apply_model
 from control_plane import secrets as secret_store
-from control_plane.config import ControlPlaneConfig
+from control_plane.config import REPO_ROOT, ControlPlaneConfig
 from control_plane.secrets import SecretStore
 from kernel.dsn import dsn_as
 from kernel.provision import (
@@ -41,7 +40,8 @@ from kernel.provision import (
     create_helpers,
     reassign_objects_to_owner,
 )
-from worker.pipeline.build import child_env, launch
+from kernel.render import quote_ident
+from worker.pipeline import build, container
 
 SCHEMA_CHANGED = (
     "The database schema in production is not the one the rules were proved"
@@ -83,7 +83,7 @@ class Enforced:
 
 
 def _store(config: ControlPlaneConfig) -> SecretStore:
-    return SecretStore(config.state_root / "secrets")
+    return secret_store.store_for(config)
 
 
 def _role_secret(dsn: str, user: str, password: str) -> dict[str, Any]:
@@ -125,7 +125,9 @@ async def ensure_roles(
         secret_store.secret_name(app_id, secret_store.MIGRATOR),
         _role_secret(dsn, roles.migrator, roles.migrator_password),
     )
-    store.put(
+    # Merged, not written over: a builder may have set the app's variables
+    # before anything provisioned it, and those are not ours to drop.
+    store.update(
         secret_store.secret_name(app_id, secret_store.RUNTIME),
         _role_secret(dsn, roles.runtime, roles.runtime_password),
     )
@@ -144,8 +146,11 @@ async def ensure_roles(
 
 
 # ---------------------------------------------------------------------------
-# Step 3: the app's own migrations, in their own process
+# Step 3: the app's own migrations, in a container
 # ---------------------------------------------------------------------------
+
+OUT_IN_CONTAINER = "/vd/out"
+RESULT_IN_CONTAINER = f"{OUT_IN_CONTAINER}/migrate-result.json"
 
 
 async def run_migration_task(
@@ -157,19 +162,51 @@ async def run_migration_task(
     migrations_path: str,
     workdir: Path,
 ) -> None:
-    result_path = workdir / "migrate-result.json"
-    outcome = await launch(
-        [sys.executable, "-m", "buildjob.migrate_task"],
-        env=child_env(
+    """The one time app code touches the real schema, and it is still a container.
+
+    Unlike the build job this does point at the customer database, because
+    migrating the app's own schema is the whole job. What keeps that honest is
+    the role: `migrator` can reach one schema and holds no admin. The container
+    is what keeps it away from everything that is not the database.
+    """
+    # Its own directory, not the workdir: the workdir holds `plan-spec.json` and
+    # `verify-spec.json`, and those carry the build job's one-time token. The
+    # app's migrations get a writable mount with nothing of ours in it.
+    out_dir = workdir / "migrate"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result_path = out_dir / "migrate-result.json"
+
+    outcome = await container.run(
+        image=config.build_image,
+        command=["python", "-m", "buildjob.migrate_task"],
+        mounts={
+            REPO_ROOT / "buildjob": "/vd/src/buildjob",
+            REPO_ROOT / "kernel": "/vd/src/kernel",
+            checkout: build.REPO_IN_CONTAINER,
+            # Writable, and only so that a failure can come back in words
+            # rather than as an exit code.
+            out_dir: OUT_IN_CONTAINER,
+            # Writable, and the same volume the two build passes installed
+            # into, so this third pass finds the packages already there.
+            build.deps_volume(workdir): build.DEPS_IN_CONTAINER,
+        },
+        writable=[OUT_IN_CONTAINER, build.DEPS_IN_CONTAINER],
+        env={
             # In the environment, never in argv: argv is world-readable.
-            VD_MIGRATOR_DSN=dsn_as(
-                config.app_admin_dsn, roles.migrator, roles.migrator_password
+            "VD_MIGRATOR_DSN": container.reachable_from_container(
+                dsn_as(config.app_admin_dsn, roles.migrator, roles.migrator_password)
             ),
-            VD_REPO_DIR=str(checkout),
-            VD_MIGRATIONS_KIND=migrations_kind,
-            VD_MIGRATIONS_PATH=migrations_path,
-            VD_RESULT_PATH=str(result_path),
-        ),
+            "VD_REPO_DIR": build.REPO_IN_CONTAINER,
+            "VD_MIGRATIONS_KIND": migrations_kind,
+            "VD_MIGRATIONS_PATH": migrations_path or "",
+            "VD_RESULT_PATH": RESULT_IN_CONTAINER,
+            "VD_DEPS_DIR": build.DEPS_IN_CONTAINER,
+            # Where to record which plain `.sql` files have already run against
+            # this database, so a redeployment does not try to create the app's
+            # tables a second time. Quoted, because it is interpolated into SQL
+            # on the other side.
+            "VD_LEDGER_SCHEMA": quote_ident(roles.ledger),
+        },
         log=workdir / "migrate.log",
     )
     if outcome.ok:

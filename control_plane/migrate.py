@@ -14,10 +14,23 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
+import asyncpg
+
 from control_plane.config import ControlPlaneConfig
 from control_plane.db import ensure_database
 
 HERE = Path(__file__).resolve().parent
+
+# One arbitrary, fixed number, so every process that migrates this database
+# contends for the same lock. Session-scoped rather than transactional because
+# Alembic runs many transactions and the lock has to span all of them.
+#
+# This exists because `prepare` is now called from the control plane's own
+# startup rather than by hand: on a box with a restart policy, two containers
+# coming up together would otherwise both run `alembic upgrade head` against an
+# empty database and the loser would fail on a table that already exists —
+# turning a routine restart into a crash loop.
+MIGRATION_LOCK = 0x7664_0001
 
 
 def alembic_config(config: ControlPlaneConfig | None = None) -> Config:
@@ -40,10 +53,21 @@ def upgrade(
 
 
 async def prepare(config: ControlPlaneConfig | None = None) -> None:
-    """Create the database if needed, then migrate it."""
+    """Create the database if needed, then migrate it, once at a time.
+
+    The lock is held for the whole upgrade and released when the connection
+    closes, so a process that dies mid-migration does not leave the next one
+    waiting forever.
+    """
     config = config or ControlPlaneConfig.from_env()
     await ensure_database(config)
-    await asyncio.to_thread(upgrade, "head", config)
+
+    conn = await asyncpg.connect(config.database_url.replace("+asyncpg", ""))
+    try:
+        await conn.execute("SELECT pg_advisory_lock($1)", MIGRATION_LOCK)
+        await asyncio.to_thread(upgrade, "head", config)
+    finally:
+        await conn.close()
 
 
 if __name__ == "__main__":

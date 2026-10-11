@@ -47,7 +47,7 @@ BOOTSTRAP = REPO_ROOT / "shims" / "python" / "bootstrap"
 SHIM_PKG = REPO_ROOT / "shims" / "python"
 
 PGBOUNCER_HOST = os.environ.get("VD_PGBOUNCER_HOST", "127.0.0.1")
-PGBOUNCER_PORT = int(os.environ.get("VD_PGBOUNCER_PORT", "56432"))
+PGBOUNCER_PORT = int(os.environ.get("VD_PGBOUNCER_PORT", "55433"))
 
 USER_COUNT = 5
 NOTES_PER_USER = 3

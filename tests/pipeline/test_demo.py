@@ -30,7 +30,7 @@ import pytest_asyncio
 
 from control_plane.models import ActionStatus, DeploymentStatus
 from tests.gateway.test_mcp_server import Agent
-from tests.pipeline.conftest import settle, sign_in
+from tests.pipeline.conftest import console, settle, sign_in
 
 ALICE = ("alice@example.com", "alice-password-1")
 BOB = ("bob@example.com", "bob-password-2")
@@ -79,10 +79,8 @@ async def _todos(pipeline, app_id: str) -> dict[str, bool]:
     return {row["title"]: row["done"] for row in rows}
 
 
-def _console(pipeline) -> httpx.AsyncClient:
-    return httpx.AsyncClient(
-        base_url=pipeline.config.public_url, follow_redirects=True, timeout=30
-    )
+def _console(pipeline):
+    return console(pipeline)
 
 
 @pytest_asyncio.fixture(scope="session")

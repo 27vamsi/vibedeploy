@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import socket
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -47,10 +49,9 @@ from control_plane.models import (
     SCHEMA,
     VerificationRun,
 )
-from control_plane.web.routes import _sole_builder
 from kernel.provision import AppRoles, drop_app_roles
 from worker import main as worker_main
-from worker.runtimes import local
+from worker.runtimes import proxy, serving
 
 REPO = REPO_ROOT / "fixtures" / "repos" / "todo"
 
@@ -76,6 +77,68 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+__all__ = ["Console", "OPERATOR", "console", "_operator"]
+
+# The one operator of this test installation. The control plane process is
+# given these as `VD_BOOTSTRAP_EMAIL`/`VD_BOOTSTRAP_PASSWORD` and creates the
+# row itself on boot, so the tests that drive the console log in exactly the
+# way a person would — and the bootstrap path gets exercised by every run
+# rather than only by its own unit test.
+OPERATOR = ("pipeline@tests.invalid", "pipeline-operator-password")
+
+
+async def _operator(session):
+    """The installation's operator, named rather than invented.
+
+    Most of these tests drive `service` directly, not the console, so they
+    still need a `Builder` to own the apps they make. The console no longer has
+    a function that conjures one — a page with no login must not be able to —
+    so the fixtures ask for one by name instead. This is the same row the
+    control plane process bootstrapped; `ensure_builder` returns it rather than
+    making a second.
+    """
+    return await service.ensure_builder(session, email=OPERATOR[0], password=OPERATOR[1])
+
+
+class Console(httpx.AsyncClient):
+    """A browser that is logged in and echoes the CSRF token back.
+
+    A real browser does both of these without being asked: it keeps the
+    session cookie and it submits the hidden field that is in the form it was
+    served. Doing it here keeps every console test about what it was about
+    before the login existed, and the token is read off a rendered page rather
+    than minted, so a form that stops carrying one is a failure and not a
+    silent pass.
+    """
+
+    csrf: str = ""
+
+    async def post(self, url, *, data=None, **kwargs):  # type: ignore[override]
+        body = dict(data or {})
+        body.setdefault("csrf", self.csrf)
+        return await super().post(url, data=body, **kwargs)
+
+    async def sign_in(self) -> None:
+        email, password = OPERATOR
+        landed = await self.post("/login", data={"email": email, "password": password})
+        # A refused login also renders 200 — it re-renders the login page with
+        # a message — so the status is not the evidence. Where it ended up is.
+        assert landed.url.path == "/", f"the login was refused: {landed.url}"
+        found = re.search(r'name="csrf" value="([^"]+)"', landed.text)
+        assert found, "the console rendered a page with no CSRF token in it"
+        self.csrf = found.group(1)
+
+
+@asynccontextmanager
+async def console(pipeline: "Harness"):
+    """A `Console` pointed at this run's control plane, already signed in."""
+    async with Console(
+        base_url=pipeline.config.public_url, follow_redirects=True, timeout=30
+    ) as client:
+        await client.sign_in()
+        yield client
+
+
 @dataclass
 class Harness:
     config: ControlPlaneConfig
@@ -97,23 +160,47 @@ class Harness:
                 return
         raise AssertionError("the worker never ran out of jobs")
 
-    async def deploy(self, branch: str, name: str | None = None) -> uuid.UUID:
+    async def deploy(
+        self,
+        branch: str,
+        name: str | None = None,
+        repo: str | Path = REPO,
+    ) -> uuid.UUID:
         """Create an app, queue `branch`, and run until the pipeline stops."""
         async with self.sessions() as session, session.begin():
-            builder = await _sole_builder(session)
+            builder = await _operator(session)
             app = await service.create_app(
                 session,
                 builder=builder,
                 name=name or f"{branch}-{secrets.token_hex(3)}",
-                repo=str(REPO),
+                repo=str(repo),
             )
             deployment = await service.start_deployment(
-                session, app=app, commit_sha=branch, answers=ANSWERS
+                session, app=app, ref=branch, answers=ANSWERS
             )
             self.app_ids.append(app.app_id)
             deployment_id = deployment.id
         await self.drain()
         return deployment_id
+
+    async def redeploy(
+        self, deployment_id: uuid.UUID, ref: str | None = None
+    ) -> uuid.UUID:
+        """Queue another deployment of the app that `deployment_id` belongs to.
+
+        The blue-green case, which `deploy` cannot express: it makes a new app
+        every time, and two versions of *different* apps have nothing to cut
+        over between.
+        """
+        async with self.sessions() as session, session.begin():
+            previous = await session.get(Deployment, deployment_id)
+            app = await session.get(App, previous.app_id)
+            deployment = await service.start_deployment(
+                session, app=app, ref=ref or previous.ref, answers=ANSWERS
+            )
+            new_id = deployment.id
+        await self.drain()
+        return new_id
 
     async def deployment(self, deployment_id: uuid.UUID) -> Deployment:
         async with self.sessions() as session:
@@ -287,6 +374,12 @@ async def pipeline(tmp_path_factory):
         database_url=CONTROL_URL,
         app_admin_dsn=DEFAULT_APP_DSN,
         sidecar_api_key=secrets.token_hex(16),
+        session_secret=secrets.token_hex(32),
+        # A real key, so that every secret this suite's deploys write is
+        # written through the envelope. Without it the whole pipeline would be
+        # exercising the plaintext path and the encryption would only ever be
+        # tested in isolation — which is the same as not testing it.
+        secret_key=secrets.token_hex(32),
         state_root=root / "state",
         public_url=f"http://127.0.0.1:{port}",
         gateway_url=gateway_url,
@@ -303,6 +396,14 @@ async def pipeline(tmp_path_factory):
         VD_CONTROL_DATABASE_URL=config.database_url,
         VD_APP_ADMIN_DSN=config.app_admin_dsn,
         VD_SIDECAR_API_KEY=config.sidecar_api_key,
+        # Every process this suite spawns reads its config from this env, and
+        # all of them have to agree about these two: a console with a
+        # different signing secret cannot be logged into, and a gateway with a
+        # different key cannot open the agent credentials the worker wrote.
+        VD_SESSION_SECRET=config.session_secret,
+        VD_SECRET_KEY=config.secret_key,
+        VD_BOOTSTRAP_EMAIL=OPERATOR[0],
+        VD_BOOTSTRAP_PASSWORD=OPERATOR[1],
         VD_STATE_ROOT=str(config.state_root),
         VD_CONTROL_PLANE_URL=config.public_url,
         VD_GATEWAY_URL=gateway_url,
@@ -346,11 +447,27 @@ async def pipeline(tmp_path_factory):
         yield harness
     finally:
         for app_id in harness.app_ids:
-            local.stop(config, app_id)
+            await serving.stop(config, app_id)
+        # The processes those routes point at have just been killed, so leaving
+        # them published would mean a developer's next `curl` gets a 502 from a
+        # test run that finished hours ago.
+        await _unpublish(config)
         gateway.stop()
         control_plane.stop()
         await engine.dispose()
         await _drop_apps(config, harness.app_ids)
+
+
+async def _unpublish(config: ControlPlaneConfig) -> None:
+    """Take this run's routes back out of the shared local proxy. Never raises.
+
+    One Caddy serves whichever control plane last wrote to it, which is fine on
+    a laptop and is why `apply` states the whole table rather than patching it.
+    """
+    try:
+        await proxy.apply(config, [])
+    except proxy.ProxyUnavailable:
+        pass
 
 
 async def _drop_apps(config: ControlPlaneConfig, app_ids: list[str]) -> None:
@@ -375,9 +492,34 @@ async def _drop_apps(config: ControlPlaneConfig, app_ids: list[str]) -> None:
         await admin.close()
 
 
+def visit(endpoint: str, **kwargs: Any) -> httpx.AsyncClient:
+    """A client that reaches an app at its real address, from Windows.
+
+    `*.localhost` resolves on Linux and macOS and does **not** resolve on
+    Windows: `socket.getaddrinfo("todo.localhost")` fails there while
+    `localhost` works. So the request is sent to the proxy's address with the
+    app's hostname in a `Host:` header, which is the only thing a resolver
+    would have contributed anyway — Caddy routes on the header, not on how the
+    packet found it.
+
+    The alternative was editing `C:\\Windows\\System32\\drivers\\etc\\hosts`
+    from a test run, which is not something a suite should do to the machine it
+    is running on.
+
+    Harmless for an address that already resolves: the `Host:` for
+    `http://127.0.0.1:54321` is `127.0.0.1`, which is what httpx would have
+    sent.
+    """
+    url = httpx.URL(endpoint)
+    headers = {"Host": url.host, **kwargs.pop("headers", {})}
+    return httpx.AsyncClient(
+        base_url=f"http://127.0.0.1:{url.port or 80}", headers=headers, **kwargs
+    )
+
+
 async def sign_in(endpoint: str, email: str, password: str) -> httpx.AsyncClient:
     """One browser, signed in through the gate. The caller closes it."""
-    browser = httpx.AsyncClient(base_url=endpoint, follow_redirects=True, timeout=20)
+    browser = visit(endpoint, follow_redirects=True, timeout=20)
     response = await browser.post(
         "/__vd/login", data={"email": email, "password": password, "next": "/"}
     )

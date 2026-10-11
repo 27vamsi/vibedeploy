@@ -178,7 +178,7 @@ Node/Prisma protection. GitHub, Stripe, internal API connectors (interface + stu
 |---|---|---|
 | Control plane | Python 3.12, FastAPI, Jinja2 + HTMX, Pydantic v2 | One codebase, no JS build |
 | Control plane DB | Postgres 16, SQLAlchemy 2, Alembic | Standard |
-| Job queue | `jobs` table, `SELECT ... FOR UPDATE SKIP LOCKED` | No Redis/SQS |
+| Job queue | `jobs` table, `SELECT ... FOR UPDATE SKIP LOCKED`, plus a renewed lease and a fencing token | No Redis/SQS. The lock ends at the claim, so the run itself is held by `lease_expires_at` and `fence` |
 | Kernel, verifier, provisioner | asyncpg + raw SQL | Exact control near roles/policies |
 | Fake data | Faker | |
 | Tests | pytest, pytest-asyncio | |
@@ -661,6 +661,18 @@ Known gaps: autocommit apps see no data (fail closed, warned). Raw psycopg/async
 
 GitHub App: Contents read, Metadata read, push webhook. Short-lived installation token per clone. Clone in the build job only.
 
+A repository does not have to be on GitHub. Three sources, decided in this order:
+a **git URL** (public only in V0.5, cloned, builds the commit the ref resolves to); a **folder**,
+asked for by the ref `working-tree`, built exactly as it is on disk including uncommitted changes
+and including a folder that happens to be a git repository; a **fixture tree** (`base/` +
+`branches/<name>/`), used by the planted-bug tests. `.env`, `.env.*`, `.git`, `.venv`,
+`node_modules` and `__pycache__` are never copied into a deployment — an app that loads its own
+`.env` and builds its own engine from the `DATABASE_URL` in it reaches a database with no identity
+and no policies, so that file does not travel. The settings it held are stored instead as the
+runtime secret's builder env vars (18.1) and injected into the app's process, except the names the
+platform owns: `DATABASE_URL`, `VD_*`, `PYTHON*`, `PATH`, `LD_*` and `DYLD_*`. The app is handed
+both `DATABASE_URL` and `VD_DATABASE_URL`, and both are the runtime role.
+
 ---
 
 ## 16. Login gate (sidecar)
@@ -913,7 +925,10 @@ Example Claude Code config:
 
 - `builders` (id, email, password_hash)
 - `apps` (id, builder_id, name, subdomain, repo, installation_id, stack, protection, status, agents_enabled)
-- `deployments` (id, app_id, commit_sha, status, image_digest, schema_hash, blocked_reason, timestamps)
+- `deployments` (id, app_id, ref, commit_sha, status, image_digest, schema_hash, blocked_reason, timestamps)
+  — `ref` is what was asked for (branch, tag or commit); `commit_sha` is what git resolved it to,
+  and is null until the clone succeeds. `verify` re-checks out `commit_sha`, never `ref`, so a push
+  cannot swap the code out from under rules a person already confirmed.
 - `access_models` (id, app_id, deployment_id, model_json, confirmed_by, confirmed_at)
 - `verification_runs` (id, deployment_id, role [runtime|agent], total, passed, failed, report_json)
 - `app_users` (id, app_id, email, password_hash, role, principal_key, session_version, disabled)

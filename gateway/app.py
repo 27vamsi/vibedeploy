@@ -44,7 +44,9 @@ def build(config: ControlPlaneConfig | None = None):
     config = config or ControlPlaneConfig.from_env()
     sessions = make_sessionmaker(make_engine(config))
     gateway = Gateway(
-        sessionmaker=sessions, secrets_root=config.state_root / "secrets"
+        sessionmaker=sessions,
+        secrets_root=config.state_root / "secrets",
+        secret_key=config.secret_key,
     )
     return mcp_server.build(
         gateway, extra_routes=[Mount(INTERNAL, app=internal(gateway, config))]

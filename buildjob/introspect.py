@@ -32,6 +32,17 @@ from kernel.render import quote_ident
 
 GRAPH_VERSION = 1
 
+# Tables a migration tool leaves behind to remember what it has already done.
+# They are in the app's schema but they are not the app's data: `alembic_version`
+# holds one revision id and nothing else, so there is no answer to "who may see
+# a row of it" and no sensible policy template for it. Describing it would also
+# make `schema_hash` depend on which revision happens to be head, so two
+# deployments of the same models would look like different schemas.
+#
+# Out of the graph is not out of reach: `policies.lock_bookkeeping` shuts these
+# tables and `attack.structural` checks that it did. Readme.md section 15.
+BOOKKEEPING = ("alembic_version",)
+
 # pg_policy.polcmd, which comes back from asyncpg as a one-byte "char".
 _POLICY_COMMANDS = {
     "*": "ALL",
@@ -46,6 +57,7 @@ SELECT c.oid, c.relname, c.relrowsecurity, c.relforcerowsecurity
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')
+  AND c.relname <> ALL($2::text[])
 ORDER BY c.relname
 """
 
@@ -74,6 +86,7 @@ JOIN pg_namespace n ON n.oid = c.relnamespace
 LEFT JOIN pg_class fc ON fc.oid = con.confrelid
 LEFT JOIN pg_namespace fn ON fn.oid = fc.relnamespace
 WHERE n.nspname = $1 AND con.contype IN ('p', 'u', 'c', 'f')
+  AND c.relname <> ALL($2::text[])
 ORDER BY c.relname, con.conname
 """
 
@@ -118,7 +131,7 @@ SELECT c.relname AS table_name, pol.polname, pol.polcmd, pol.polpermissive,
 FROM pg_policy pol
 JOIN pg_class c ON c.oid = pol.polrelid
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = $1
+WHERE n.nspname = $1 AND c.relname <> ALL($2::text[])
 ORDER BY c.relname, pol.polname
 """
 
@@ -136,8 +149,9 @@ async def introspect(conn: asyncpg.Connection, schema: str) -> dict[str, Any]:
 
 
 async def _introspect(conn: asyncpg.Connection, schema: str) -> dict[str, Any]:
-    table_rows = await conn.fetch(_TABLES, schema)
-    constraint_rows = await conn.fetch(_CONSTRAINTS, schema)
+    skip = list(BOOKKEEPING)
+    table_rows = await conn.fetch(_TABLES, schema, skip)
+    constraint_rows = await conn.fetch(_CONSTRAINTS, schema, skip)
 
     # Resolve every relation a constraint can name, including the far side of a
     # foreign key that points outside the app schema.
@@ -226,7 +240,7 @@ async def _introspect(conn: asyncpg.Connection, schema: str) -> dict[str, Any]:
     ]
 
     policies: dict[str, list[dict[str, Any]]] = {}
-    for row in await conn.fetch(_POLICIES, schema):
+    for row in await conn.fetch(_POLICIES, schema, skip):
         policies.setdefault(row["table_name"], []).append(
             {
                 "name": row["polname"],

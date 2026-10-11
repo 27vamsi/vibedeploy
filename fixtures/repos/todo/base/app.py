@@ -11,6 +11,7 @@ Postgres row level security does the filtering.
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 from fastapi import FastAPI
@@ -39,6 +40,25 @@ async def _rows(statement):
 
 @app.get("/todos")
 async def todos():
+    rows = await _rows(ALL_TODOS)
+    return {"todos": [{**row, "id": str(row["id"])} for row in rows]}
+
+
+@app.get("/slow")
+async def slow(seconds: float = 0.4):
+    """The same unfiltered read, but slowly, so it can be caught mid-flight.
+
+    Here for one reason: a drain exists to let requests that are *already
+    running* finish, and a request that takes no time is never already running
+    when you look. `tests/pipeline/test_zero_downtime.py` keeps a few of these
+    in flight across a cutover, which is what makes "zero dropped requests" a
+    measurement rather than a hope — and what makes the no-drain case fail
+    reliably instead of occasionally.
+
+    Nothing about it is special otherwise. Same statement, same absence of a
+    WHERE clause, same two people seeing two different lists.
+    """
+    await asyncio.sleep(min(max(seconds, 0.0), 5.0))
     rows = await _rows(ALL_TODOS)
     return {"todos": [{**row, "id": str(row["id"])} for row in rows]}
 

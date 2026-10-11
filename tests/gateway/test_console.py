@@ -47,6 +47,12 @@ CONTROL_URL = (
 
 CONSOLE_KEY = "the-console-key-and-nothing-else"
 
+SESSION_SECRET = "the-console-session-secret-and-nothing-else"
+# The operator `tests.gateway.conftest.wire` already creates. Signing in as
+# somebody who exists is the point: the console has one operator and the
+# fixture is not allowed to invent a second one behind the login.
+OPERATOR = ("builder@localhost", "not-a-real-password")
+
 POLICY = """
 agent: alices-helper
 acts_for: alice@example.com
@@ -88,6 +94,7 @@ def _config(wired) -> ControlPlaneConfig:
         database_url=CONTROL_URL,
         app_admin_dsn=DEFAULT_APP_DSN,
         sidecar_api_key="unused here",
+        session_secret=SESSION_SECRET,
         state_root=wired.gateway._store.root.parent,
         public_url="http://127.0.0.1:0",
         gateway_api_key=CONSOLE_KEY,
@@ -105,6 +112,35 @@ async def wired(gateway_admin, tmp_path_factory):
         yield wired
 
 
+class Browser(httpx.AsyncClient):
+    """A client that has signed in, and that echoes the CSRF token back.
+
+    Both halves are what a browser does and neither is a shortcut: the cookie
+    comes from a real `POST /login`, and the token is read out of the HTML of a
+    page the console rendered, exactly as the hidden field in the form would
+    have been submitted. A test that wrote the token itself would prove nothing
+    about the token being on the page.
+    """
+
+    csrf: str = ""
+
+    async def post(self, url, *, data=None, **kwargs):  # type: ignore[override]
+        body = dict(data or {})
+        body.setdefault("csrf", self.csrf)
+        return await super().post(url, data=body, **kwargs)
+
+    async def sign_in(self, email: str, password: str) -> None:
+        landed = await self.post("/login", data={"email": email, "password": password})
+        # A refused login also renders 200 — it re-renders the login page — so
+        # the status is not the evidence. Where it ended up is.
+        assert landed.url.path == "/", landed.url
+        home = await self.get("/")
+        assert home.status_code == 200, home.text
+        found = re.search(r'name="csrf" value="([^"]+)"', home.text)
+        assert found, "the console rendered a form with no CSRF token in it"
+        self.csrf = found.group(1)
+
+
 @pytest_asyncio.fixture(scope="module")
 async def served(wired):
     """The control plane process, talking to the gateway process."""
@@ -116,12 +152,13 @@ async def served(wired):
         console.state.gateway = Loopback(
             gateway_app.internal(wired.gateway, config), api_key=CONSOLE_KEY
         )
-        async with httpx.AsyncClient(
+        async with Browser(
             transport=httpx.ASGITransport(app=console),
             base_url="http://console",
             follow_redirects=True,
             timeout=30,
         ) as client:
+            await client.sign_in(*OPERATOR)
             yield console, client
 
 

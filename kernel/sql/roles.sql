@@ -33,6 +33,22 @@ REVOKE ALL ON SCHEMA {schema} FROM PUBLIC;
 -- that has no policies on it.
 GRANT USAGE ON SCHEMA {schema} TO {runtime}, {agent};
 
+-- Where the platform keeps its own notes about this app -- today, which plain
+-- `.sql` migrations have already been applied, so a second deployment does not
+-- try to create the same table twice.
+--
+-- A second schema rather than a table in {schema}, because everything in
+-- {schema} is introspected, given a policy from the five templates and then
+-- attacked. A bookkeeping table in there would need either a policy it has no
+-- business having, or an exception by name in the verifier -- and an exception
+-- by name is a table an app could create in order to hide in.
+--
+-- The migrator can write here through its membership of {owner}. Deliberately
+-- no grant at all to {runtime} or {agent}: without USAGE on the schema, there
+-- is nothing here for the app or the gateway to reach, policy or no policy.
+CREATE SCHEMA {ledger} AUTHORIZATION {owner};
+REVOKE ALL ON SCHEMA {ledger} FROM PUBLIC;
+
 -- Readme.md section 9.1 also has `ALTER ROLE {migrator} SET role = {owner}` so
 -- that migrated objects come out owned by the owner. That cannot be combined
 -- with the BYPASSRLS above: once the session has SET ROLE to the owner, the
