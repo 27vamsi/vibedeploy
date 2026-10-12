@@ -34,18 +34,56 @@
 
 <main>
 
+  {# Two columns, 55/45, and the asymmetry is the point: the left half is the
+     claim and the right half is the claim being checked. Both halves are one
+     `<section>` so the page-load stagger is a single orchestration. #}
   <section class="hero">
-    <p class="eyebrow">self-hosted · python · postgres</p>
-    <h1>Your code forgets the <em>where</em> clause. Postgres doesn&rsquo;t.</h1>
-    <p class="lede">vibedeploy reads your schema, asks you the few things it
-      cannot know, and derives who may see what. Then it <strong>attacks
-      what it derived</strong> &mdash; as a stranger, as each of your users, and as an
-      AI agent working for one of them. One row in the wrong hands and the
-      release does not go live.</p>
-    <p class="cta">
-      <a class="button" href="/signup">Point it at a repo</a>
-      <a class="button ghost" href="#proof">See it refuse</a>
-    </p>
+    <div class="hero-copy">
+      <p class="eyebrow">the security gate for ai-built apps</p>
+      <h1><span class="then">vibe coded the app ?</span><span class="now">now vibeDeploy.</span></h1>
+      <p class="lede">AI can build your app in minutes. It can also leave your
+        users&rsquo; data exposed. vibedeploy finds those gaps, enforces access
+        rules inside Postgres, and tests whether they actually hold &mdash; before
+        your app goes live.</p>
+      <p class="cta">
+        <a class="button" href="/signup">secure my app <span aria-hidden="true">&#8599;</span></a>
+        <a class="button ghost" href="#how">See how it works <span aria-hidden="true">&#8599;</span></a>
+      </p>
+      <ol class="flow">
+        <li>read schema</li>
+        <li>enforce policies</li>
+        <li>attack-test</li>
+        <li>deploy</li>
+      </ol>
+    </div>
+
+    {# An illustration of the real thing, labelled as one. The table and the
+       verdicts are made up; the policy template name (`owner_column`, one of
+       the five in Readme.md section 7.3) and the predicate are not, because a
+       product that sells not lying about security should not open with a
+       screenshot of a mechanism it does not have. #}
+    <figure class="gate">
+      <div class="gate-top">
+        <span class="gate-id">policy inspection</span>
+        <span class="gate-tag">example</span>
+      </div>
+
+      <dl class="gate-facts">
+        <div><dt>table</dt><dd>public.documents</dd></div>
+        <div><dt>policy</dt><dd>owner_column</dd></div>
+        <div><dt>rule</dt><dd>user_id = current_setting('app.user_id')::uuid</dd></div>
+      </dl>
+
+      <ol class="gate-tests">
+        <li><span class="n">test 01</span><span class="t">owner reads own document</span><span class="v pass">pass</span></li>
+        <li><span class="n">test 02</span><span class="t">user reads another user&rsquo;s document</span><span class="v stop">blocked</span></li>
+        <li><span class="n">test 03</span><span class="t">anonymous user requests private data</span><span class="v stop">blocked</span></li>
+      </ol>
+
+      <figcaption class="gate-foot">
+        <span class="beacon" aria-hidden="true"></span>access boundaries verified
+      </figcaption>
+    </figure>
   </section>
 
   <div class="tape">
@@ -69,9 +107,10 @@
   <section id="proof" class="reveal">
     <p class="eyebrow">the one claim</p>
     <h1 style="max-width:30ch">An unfiltered query is still a safe query.</h1>
-    <p class="lede">This is the worst line of data access in your codebase. It
-      asks for every invoice in the table and it does not mention who is
-      asking. Watch what three different people get back from it.</p>
+    <p class="lede">This is the query that gets written when you are moving
+      fast, and there is one in almost every codebase. It asks for every invoice
+      in the table and it never mentions who is asking. Watch what three
+      different people get back from it.</p>
 
     <div class="proof">
       <div>

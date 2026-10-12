@@ -58,13 +58,36 @@ section { padding: clamp(4rem, 11vw, 8rem) 0 0; }
 
 /* ------------------------------------------------------------------- hero */
 
+/* 55/45, and deliberately not 50/50 — equal halves read as a comparison, and
+ * this is not one. The left column is what the product claims, the right is
+ * that claim being checked, and the claim should be the larger of the two.
+ *
+ * `minmax(0, …fr)` rather than bare `fr` because the panel holds a long
+ * unbroken predicate string; without the zero floor that string sets the
+ * column's minimum width and the whole grid overflows the container. */
 .hero {
-  padding: clamp(3.5rem, 9vw, 7rem) 0 0;
   position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 55fr) minmax(0, 45fr);
+  gap: clamp(2rem, 5vw, 4.5rem);
+  align-items: center;
+  padding: clamp(3rem, 8vw, 6rem) 0 clamp(1rem, 3vw, 2rem);
 }
 
-/* A single wash of light behind the headline, placed off-centre. Centred, it
- * would read as the purple-gradient hero every other tool has. */
+/* One column well before the panel gets narrow enough to wrap its labels. The
+ * copy goes first, because a headline below an illustration of a thing nobody
+ * has explained yet is an illustration of nothing. */
+@media (max-width: 64rem) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: clamp(2.5rem, 7vw, 3.5rem);
+    align-items: start;
+  }
+}
+
+/* A single wash of light in the top-right, above and behind the panel. Kept
+ * off-centre and at 7%: centred and brighter it would read as the gradient hero
+ * every other tool has. */
 .hero::before {
   content: "";
   position: absolute;
@@ -82,24 +105,32 @@ section { padding: clamp(4rem, 11vw, 8rem) 0 0; }
   to   { transform: translate3d(-3rem, 2rem, 0) scale(1.12); }
 }
 
+/* Two block spans rather than a `<br>`: the line break is structural here —
+ * each line is a different colour and the second is the answer to the first —
+ * and a break character cannot be styled or read as two things. */
 .hero h1 {
   position: relative;
-  max-width: 24ch;
-  margin: 0 0 1.5rem;
-  font: 400 clamp(2.6rem, 7.6vw, 5.4rem)/0.96 var(--display);
-  letter-spacing: -0.025em;
+  margin: 0 0 1.6rem;
+  font: 400 clamp(2.3rem, 4.9vw, 3.9rem)/1.04 var(--display);
+  letter-spacing: -0.02em;
 }
 
-.hero h1 em {
-  font-style: italic;
+.hero h1 span { display: block; }
+.hero h1 .then { color: var(--ink); }
+
+/* The payoff line. Lime, and tucked very slightly left so the two lines share
+ * an optical edge rather than a mechanical one — serif `v` has more side
+ * bearing than `n`. */
+.hero h1 .now {
   color: var(--signal);
+  margin-left: -0.04em;
 }
 
 .lede {
-  max-width: 54ch;
-  margin: 0 0 2.5rem;
-  font-size: clamp(16px, 2.1vw, 19px);
-  line-height: 1.55;
+  max-width: 550px;
+  margin: 0 0 2.25rem;
+  font-size: clamp(15.5px, 1.25vw, 17.5px);
+  line-height: 1.6;
   color: var(--ink-dim);
 }
 
@@ -107,15 +138,220 @@ section { padding: clamp(4rem, 11vw, 8rem) 0 0; }
 
 .cta { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
 .cta .button { padding: 0.8rem 1.5rem; }
+.hero .cta .button.ghost { padding: 0.8rem 1.25rem; font-size: 12px; }
 
-/* Staggered on load. One orchestration, four steps, then it is over. */
-@media (prefers-reduced-motion: no-preference) {
-  .hero > * { animation: rise 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
-  .hero > :nth-child(1) { animation-delay: 0.05s; }
-  .hero > :nth-child(2) { animation-delay: 0.15s; }
-  .hero > :nth-child(3) { animation-delay: 0.28s; }
-  .hero > :nth-child(4) { animation-delay: 0.4s; }
+/* ------------------------------------------------------- the process strip */
+
+/* The four steps of a release, as micro-type. A list and not a sentence,
+ * because the order is the content. */
+.flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem 0.9rem;
+  margin: clamp(2.25rem, 5vw, 3.25rem) 0 0;
+  padding: 0.9rem 0 0;
+  border-top: 1px solid var(--rule);
+  list-style: none;
+  font: 400 10.5px/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
 }
+
+.flow li { display: flex; align-items: center; gap: 0.9rem; }
+
+/* The arrow belongs to the gap between two steps, so it hangs off every item
+ * but the first rather than being typed into the words. */
+.flow li + li::before {
+  content: "→";
+  color: var(--signal);
+  opacity: 0.55;
+  letter-spacing: 0;
+}
+
+/* ------------------------------------------------- the inspection panel */
+
+/* Charcoal with a green cast, a hair lighter than the page, and no shadow:
+ * the panel is separated by its own edge and by the grid behind it, not by
+ * being lifted off the page. Those two values are the only new colours on
+ * this page — everything else is the product's existing palette. */
+.gate {
+  --panel: #151815;
+  --panel-rule: #2c302c;
+
+  margin: 0;
+  background: var(--panel);
+  border: 1px solid var(--panel-rule);
+  border-radius: 3px;
+  overflow: hidden;
+  /* A technical surface, very quietly: 4px of hairline grid at 2% opacity,
+   * which reads as texture at arm's length and as nothing at all up close. */
+  background-image:
+    linear-gradient(rgba(241, 239, 232, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(241, 239, 232, 0.02) 1px, transparent 1px);
+  background-size: 4px 4px;
+}
+
+.gate-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 1.1rem;
+  border-bottom: 1px solid var(--panel-rule);
+  font: 400 10.5px/1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.gate-id { color: var(--ink-dim); }
+
+/* Says "example" on the face of the panel, not in a footnote under it. The
+ * numbers in here are invented and the page should admit that where somebody
+ * is actually looking. */
+.gate-tag {
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--panel-rule);
+  border-radius: 2px;
+  color: var(--ink-faint);
+  letter-spacing: 0.12em;
+}
+
+/* key/value rows. `<dl>` because that is what this is, and each pair is
+ * wrapped in a `<div>` so the two can sit on one line without `<dt>` and
+ * `<dd>` being made grid items of the same track. */
+.gate-facts {
+  margin: 0;
+  padding: 1.1rem 1.1rem 0.9rem;
+  border-bottom: 1px solid var(--panel-rule);
+  font: 400 12px/1.5 var(--mono);
+}
+
+.gate-facts > div {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+  padding: 0.22rem 0;
+}
+
+.gate-facts dt {
+  color: var(--ink-faint);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  padding-top: 0.18rem;
+}
+
+/* The predicate is long and has no spaces to break at, so it is allowed to
+ * break anywhere rather than widening the column it is in. */
+.gate-facts dd {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.gate-tests {
+  margin: 0;
+  padding: 0.55rem 0;
+  list-style: none;
+  font: 400 11.5px/1.35 var(--mono);
+}
+
+.gate-tests li {
+  display: grid;
+  grid-template-columns: 4.5rem minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: baseline;
+  padding: 0.5rem 1.1rem;
+}
+
+.gate-tests .n { color: var(--ink-faint); letter-spacing: 0.08em; }
+.gate-tests .t { color: var(--ink-dim); }
+
+.gate-tests .v {
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* Both verdicts are lime, and that is not an oversight. On this panel PASS and
+ * BLOCKED are both the wanted answer — a blocked attack is the product
+ * working — so colouring BLOCKED red would say the opposite of what happened.
+ * The two are told apart by their glyph, not by alarm. */
+.gate-tests .v::before {
+  margin-right: 0.4rem;
+  color: var(--signal);
+}
+
+.gate-tests .pass { color: var(--signal); }
+.gate-tests .pass::before { content: "+"; }
+
+.gate-tests .stop { color: var(--ink); }
+.gate-tests .stop::before { content: "×"; }
+
+.gate-foot {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.85rem 1.1rem;
+  border-top: 1px solid var(--panel-rule);
+  background: rgba(198, 244, 50, 0.035);
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+
+.beacon {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--signal);
+  flex: none;
+}
+
+/* ------------------------------------------------------------- entrance */
+
+/* One orchestration on load and then it is over — nothing on this page loops
+ * except the light behind the headline. The panel's rows arrive last and in
+ * order, because the order is the story: a rule, then the rule being tried. */
+@media (prefers-reduced-motion: no-preference) {
+  .hero-copy > *,
+  .gate > * {
+    animation: rise 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .hero-copy > :nth-child(1) { animation-delay: 0.05s; }
+  .hero-copy > :nth-child(2) { animation-delay: 0.14s; }
+  .hero-copy > :nth-child(3) { animation-delay: 0.26s; }
+  .hero-copy > :nth-child(4) { animation-delay: 0.36s; }
+  .hero-copy > :nth-child(5) { animation-delay: 0.46s; }
+
+  .gate { animation: rise 0.9s cubic-bezier(0.16, 1, 0.3, 1) 0.2s both; }
+  .gate > :nth-child(1) { animation-delay: 0.42s; }
+  .gate > :nth-child(2) { animation-delay: 0.54s; }
+  /* The test list is not animated as a block: its rows arrive one at a time
+   * below, and animating the container too would fade the whole group in at 0s
+   * ahead of the panel that contains it. */
+  .gate > :nth-child(3) { animation: none; }
+  .gate > :nth-child(4) { animation-delay: 1.26s; }
+
+  /* The three verdicts, one after another, so the panel is read as something
+   * happening rather than as a static screenshot. `both` holds them hidden
+   * until their turn. */
+  .gate-tests li {
+    animation: rise 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .gate-tests li:nth-child(1) { animation-delay: 0.72s; }
+  .gate-tests li:nth-child(2) { animation-delay: 0.9s; }
+  .gate-tests li:nth-child(3) { animation-delay: 1.08s; }
+}
+
+/* Restrained on purpose: the row lightens and nothing moves. */
+.gate-tests li { transition: background 0.14s; }
+.gate-tests li:hover { background: rgba(241, 239, 232, 0.025); }
 
 /* ----------------------------------------------------------- the rule tape */
 
