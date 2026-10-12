@@ -1,0 +1,288 @@
+{# The public front page. Readme.md section 23.
+
+   Standalone rather than extending `base.html`, because `base.html` is the
+   signed-in console: it prints an operator's address and a sign-out form. This
+   page is served to strangers and must have nothing of the kind on it.
+
+   Every number and claim here is one the product actually produces. The stats
+   strip is the shape of a real verification run and the scope panel is the
+   report's own scope, printed at the same size as the claims it bounds. #}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vibedeploy — ship it, then try to break it</title>
+<meta name="description" content="A self-hosted deployment control plane for Python and Postgres apps. It derives who may see what, attacks the result as a stranger, as a user and as an AI agent, and refuses to go live if a single row escapes.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="/static/vd.css">
+<link rel="stylesheet" href="/static/landing.css">
+</head>
+<body class="landing">
+
+<header class="topbar">
+  <a class="mark" href="/">vibedeploy</a>
+  <nav>
+    <a href="#proof">the proof</a>
+    <a href="#how">how</a>
+    <a href="#scope">scope</a>
+    <a href="/login">sign in</a>
+  </nav>
+</header>
+
+<main>
+
+  <section class="hero">
+    <p class="eyebrow">self-hosted · python · postgres</p>
+    <h1>Your code forgets the <em>where</em> clause. Postgres doesn&rsquo;t.</h1>
+    <p class="lede">vibedeploy reads your schema, asks you the few things it
+      cannot know, and derives who may see what. Then it <strong>attacks
+      what it derived</strong> &mdash; as a stranger, as each of your users, and as an
+      AI agent working for one of them. One row in the wrong hands and the
+      release does not go live.</p>
+    <p class="cta">
+      <a class="button" href="/signup">Point it at a repo</a>
+      <a class="button ghost" href="#proof">See it refuse</a>
+    </p>
+  </section>
+
+  <div class="tape">
+    <div class="tape-run">
+      {# Doubled, because the keyframe translates by exactly half its width. #}
+      {% for _ in range(2) %}
+      <span>force row level security on every table</span>
+      <span>no identity, zero rows &mdash; never everything</span>
+      <span>five policy templates, no freestyle sql</span>
+      <span>no using (true)</span>
+      <span>the attack suite runs as the app and as the agent</span>
+      <span>test expectations never read the policies back</span>
+      <span>no llm decides allow or deny</span>
+      <span>migrations never run in the worker</span>
+      <span>audit before action</span>
+      <span>grants go last</span>
+      {% endfor %}
+    </div>
+  </div>
+
+  <section id="proof" class="reveal">
+    <p class="eyebrow">the one claim</p>
+    <h1 style="max-width:30ch">An unfiltered query is still a safe query.</h1>
+    <p class="lede">This is the worst line of data access in your codebase. It
+      asks for every invoice in the table and it does not mention who is
+      asking. Watch what three different people get back from it.</p>
+
+    <div class="proof">
+      <div>
+        <p class="proof-head"><span>the app&rsquo;s actual query</span><span>unchanged</span></p>
+<pre class="sql"><span class="kw">select</span> id, customer, amount
+<span class="kw">from</span> invoices
+<span class="bad">-- no where clause. no tenant id. nothing.</span></pre>
+        <p class="aside">Nothing above was rewritten, proxied or inspected. The
+          rows are decided by row-level security policies on the table itself,
+          under a role that cannot bypass them and does not own them. An app
+          with a bug, a careless ORM call, a leaked API route and an AI agent
+          all hit the same wall, because it is not in the app.</p>
+      </div>
+
+      <div class="takes">
+        <div class="take">
+          <p class="who-is"><span class="as">signed in as</span> <b>alice@acme.com</b></p>
+          <div class="row"><span class="tick">+</span><span class="what">inv_8831 &mdash; $4,200</span><span class="owner">alice</span></div>
+          <div class="row"><span class="tick">+</span><span class="what">inv_9044 &mdash; $980</span><span class="owner">alice</span></div>
+          <div class="row gone"><span class="tick">&minus;</span><span class="what">inv_7712 &mdash; $15,500</span><span class="owner">bob</span></div>
+          <p class="verdict"><b>2 rows.</b> The two that are hers.</p>
+        </div>
+
+        <div class="take">
+          <p class="who-is"><span class="as">an AI agent acting for</span> <b>bob@acme.com</b></p>
+          <div class="row"><span class="tick">+</span><span class="what">inv_7712 &mdash; $15,500</span><span class="owner">bob</span></div>
+          <div class="row gone"><span class="tick">&minus;</span><span class="what">inv_8831 &mdash; $4,200</span><span class="owner">alice</span></div>
+          <div class="row gone"><span class="tick">&minus;</span><span class="what">inv_9044 &mdash; $980</span><span class="owner">alice</span></div>
+          <p class="verdict"><b>1 row.</b> Exactly what Bob would have got. Not a
+            second security model &mdash; the same policies, a different role.</p>
+        </div>
+
+        <div class="take">
+          <p class="who-is"><span class="as">no session, no identity</span> <b>&mdash;</b></p>
+          <div class="row gone"><span class="tick">&minus;</span><span class="what">inv_8831 &mdash; $4,200</span><span class="owner">alice</span></div>
+          <div class="row gone"><span class="tick">&minus;</span><span class="what">inv_9044 &mdash; $980</span><span class="owner">alice</span></div>
+          <div class="row gone"><span class="tick">&minus;</span><span class="what">inv_7712 &mdash; $15,500</span><span class="owner">bob</span></div>
+          <p class="verdict none"><b>0 rows.</b> Fail closed. Missing identity is
+            never read as permission to see everything.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="how" class="reveal">
+    <p class="eyebrow">what happens when you push</p>
+    <h1 style="max-width:26ch">Five steps, and any one of them can say no.</h1>
+
+    <div class="steps">
+      <div class="step">
+        <h3>Detect</h3>
+        <p>Reads the repository and names the stack: the framework, the database
+          library, where the migrations live, how they are run. Deterministic.
+          If it cannot tell, it says so instead of guessing.</p>
+      </div>
+      <div class="step">
+        <h3>Ask</h3>
+        <p>The few things a schema cannot tell anyone &mdash; who your users are to
+          each other, what is shared, what is private, what is sensitive. In
+          English, once. No answer, no launch.</p>
+      </div>
+      <div class="step">
+        <h3>Derive</h3>
+        <p>Your answers and your tables become an access model, built from five
+          policy templates and nothing else. Every policy covers select, insert,
+          update and delete, with both <code>using</code> and
+          <code>with check</code>. You read it back in plain sentences and
+          confirm it before anything is written.</p>
+      </div>
+      <div class="step">
+        <h3>Attack</h3>
+        <p>Your migrations run in a throwaway database inside a container, and
+          the result is attacked there: every table, every verb, every persona,
+          as the app&rsquo;s own role and again as an agent&rsquo;s. The expectations come
+          from the seeding plan, never from reading the policies back &mdash; so a
+          wrong policy cannot grade its own paper.</p>
+      </div>
+      <div class="step">
+        <h3>Cut over</h3>
+        <p>The new version starts beside the old one and gets no traffic until
+          it passes the health gate several times in a row. Then the proxy
+          moves, requests in flight are allowed to finish, and only then is the
+          old one stopped. A version that never gets healthy never gets a
+          single request.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="reveal">
+    {# The four numbers are fixed by the design, not by one repository's run:
+       how many probes a given schema gets depends on how many tables it has,
+       so a count here would be a number made up about somebody else's app. #}
+    <p class="eyebrow">what a run covers</p>
+    <h1 style="max-width:24ch">Every claim here is a re-runnable test.</h1>
+    <div class="stats">
+      <div class="stat"><b>4</b><span>verbs probed on every table</span></div>
+      <div class="stat"><b>5</b><span>policy templates, and no other sql</span></div>
+      <div class="stat"><b>2</b><span>roles attacked, results compared</span></div>
+      <div class="stat"><b>0</b><span>failures tolerated</span></div>
+    </div>
+    <p class="aside" style="border:0;padding-top:1.5rem">The suite runs once as
+      the role your app connects with and once as the role an AI agent connects
+      with. Both answers are kept. If they differ by one row, the agent can
+      exceed the person it works for, and the deploy stops. The access model and
+      its results are saved on every run &mdash; including the runs that failed.</p>
+  </section>
+
+  <section class="reveal">
+    <p class="eyebrow">and when something goes wrong anyway</p>
+    <h1 style="max-width:22ch">Interrupted is not the same as broken.</h1>
+    <div class="cols">
+      <div class="col">
+        <h3>Nothing runs twice</h3>
+        <p>Work is claimed with a renewed lease and a fencing token. A worker
+          that stalls loses its claim; if it wakes up later, its writes are
+          rejected rather than applied on top of somebody else&rsquo;s.</p>
+      </div>
+      <div class="col">
+        <h3>A stale worker cannot route traffic</h3>
+        <p>Traffic is only ever granted by a write that the fence protects, and
+          every container we start is labelled with the app, the generation and
+          the deployment that owns it. Leftovers are reaped, not inherited.</p>
+      </div>
+      <div class="col">
+        <h3>It picks up where it stopped</h3>
+        <p>Kill the machine mid-deploy and a reconciliation loop works out what
+          actually exists, adopts what is ours, re-states the route table from
+          the database and either resumes the deploy or blocks it with a reason.</p>
+      </div>
+      <div class="col">
+        <h3>Your code never runs as us</h3>
+        <p>Your migrations are code we have never read, so they run in a
+          container, never as a subprocess of the worker &mdash; and the database
+          they are proved against is a throwaway instance no app lives in.</p>
+      </div>
+    </div>
+  </section>
+
+  <section id="scope" class="reveal">
+    <p class="eyebrow">the part nobody prints</p>
+    <h1 style="max-width:24ch">What this proves, and what it does not.</h1>
+    <p class="lede">A report that does not carry its own limits is marketing.
+      Here are both halves, in the same type.</p>
+    <div class="scope">
+      <div>
+        <p class="proof-head"><span>covered</span></p>
+        <ul class="yes">
+          <li>the schema hash and access model version</li>
+          <li>all four database roles, by name</li>
+          <li>select, insert, update and delete</li>
+          <li>owner, second user, admin, anonymous</li>
+          <li>app role and agent role, compared</li>
+          <li>every policy template actually in use</li>
+        </ul>
+      </div>
+      <div>
+        <p class="proof-head"><span>not covered</span></p>
+        <ul class="no">
+          <li>application logic above the database</li>
+          <li>side channels and timing</li>
+          <li>the migrator role and the platform operator</li>
+          <li>network isolation between your apps</li>
+          <li>denial of service</li>
+          <li>any database reached outside the proven schema</li>
+        </ul>
+      </div>
+    </div>
+    <p class="aside" style="border:0">Container isolation here is defence in
+      depth, not a sandbox. Anyone who can deploy to an installation can run
+      code on it, which is why an installation belongs to one team.</p>
+  </section>
+
+  <section class="closing reveal">
+    <h2>Give it a repository.<br>Let it tell you what it finds.</h2>
+    <p class="lede" style="margin-inline:auto">A Python app with Postgres
+      migrations is enough &mdash; plain <code>.sql</code> files or Alembic. It will
+      detect the stack, ask its questions, show you the rules in your own words
+      and refuse to deploy anything it cannot prove.</p>
+    <p class="cta">
+      <a class="button" href="/signup">Create an account</a>
+      <a class="button ghost" href="/login">I already have one</a>
+    </p>
+  </section>
+
+  <footer>
+    <span>vibedeploy &mdash; ship securely, recover automatically, prove both</span>
+    <span>postgres row-level security · no llm in the allow path</span>
+  </footer>
+
+</main>
+
+<script>
+  /* Reveal on approach. Progressive: the stylesheet only hides `.reveal`, and
+     if this never runs the observer never adds `.seen` — so the fallback has to
+     be that the class is removed outright rather than waited for. */
+  (function () {
+    var targets = document.querySelectorAll('.reveal');
+    if (!('IntersectionObserver' in window)) {
+      targets.forEach(function (el) { el.classList.add('seen'); });
+      return;
+    }
+    var seen = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('seen');
+        seen.unobserve(entry.target);
+      });
+    }, { rootMargin: '0px 0px -12% 0px' });
+    targets.forEach(function (el) { seen.observe(el); });
+  })();
+</script>
+
+</body>
+</html>

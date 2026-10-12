@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from control_plane import auth, migrate, service
@@ -38,7 +40,7 @@ async def _bootstrap_operator(sessionmaker, config: ControlPlaneConfig) -> None:
     if not (config.bootstrap_email and config.bootstrap_password):
         return
     async with sessionmaker() as session:
-        if await auth.sole_builder(session) is not None:
+        if await auth.administrator(session) is not None:
             return
         await service.ensure_builder(
             session, email=config.bootstrap_email, password=config.bootstrap_password
@@ -85,6 +87,14 @@ def create_app(config: ControlPlaneConfig | None = None) -> FastAPI:
             await engine.dispose()
 
     app = FastAPI(title="vibedeploy control plane", lifespan=lifespan)
+    # The stylesheets, and nothing else. A directory rather than two routes so
+    # that adding a file to it is not also a code change; it holds no secrets
+    # and is the one part of the console a stranger is meant to fetch.
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(Path(__file__).parent / "web" / "static")),
+        name="static",
+    )
     app.include_router(internal.router)
     # The only router here anyone outside this machine may reach. It
     # authenticates every request itself, with GitHub's signature.

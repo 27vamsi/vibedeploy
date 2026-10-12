@@ -2,37 +2,42 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}vibedeploy{% endblock %}</title>
+  {# Not indexed and not followed: every page that extends this one is behind a
+     login, and the ones that are not are a login form. #}
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="/static/vd.css">
   <script src="https://unpkg.com/htmx.org@2.0.4"></script>
-  <style>
-    body { font: 15px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 52rem; color: #111; }
-    h1, h2, h3 { font-weight: 600; }
-    a { color: #0b5; }
-    fieldset { border: 1px solid #ddd; margin: 0 0 1rem; }
-    label { display: block; margin: .3rem 0; }
-    table { border-collapse: collapse; width: 100%; }
-    td, th { text-align: left; padding: .3rem .6rem; border-bottom: 1px solid #eee; }
-    code { background: #f4f4f4; padding: 0 .2rem; }
-    .blocked { background: #fdecea; border-left: 4px solid #c00; padding: .8rem; }
-    .live { background: #e8f8ee; border-left: 4px solid #0a5; padding: .8rem; }
-    .waiting { background: #fff8e1; border-left: 4px solid #e0a800; padding: .8rem; }
-    .muted { color: #666; }
-    .who { float: right; font-size: 13px; color: #666; }
-    .who form, .who button { display: inline; }
-  </style>
 </head>
 <body>
-  <p>
-    <a href="/">vibedeploy</a>
+  {# A block rather than a flag, so the entry pages (login, signup, setup) can
+     empty it outright: a sign-in form should carry no navigation and nobody's
+     address. #}
+  {% block chrome %}
+  <header class="topbar">
+    <a class="mark" href="{{ "/dashboard" if me else "/" }}">vibedeploy</a>
     {% if me %}
-    <span class="who">{{ me.email }} ·
+    <nav>
+      <a href="/dashboard">apps</a>
+      <a href="/audit">audit</a>
+      {# The one link that is not the same for everybody. `is_admin` is worked
+         out from the database on every request, never read from the cookie. #}
+      {% if me.is_admin %}<a href="/admin">everyone</a>{% endif %}
+    </nav>
+    <span class="who">
+      {{ me.email }}
       <form method="post" action="/logout">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button type="submit">sign out</button>
+        <button type="submit" class="ghost">sign out</button>
       </form>
     </span>
     {% endif %}
-  </p>
-  {% block body %}{% endblock %}
+  </header>
+  {% endblock %}
+  <main class="{% block main_class %}{% endblock %}">{% block body %}{% endblock %}</main>
 </body>
 </html>

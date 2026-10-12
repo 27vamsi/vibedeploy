@@ -12,10 +12,14 @@ app's own people go through — one place in the product compares a password) an
 a signed cookie carrying the builder's id.
 
 Signed, not stored. A server-side session table would be a second thing to
-migrate, expire and reconcile, and it buys nothing here: there is one operator
-per installation and the only revocation we need is changing the secret. The
-signature is HMAC-SHA256 over the payload with `VD_SESSION_SECRET`, which is
-stdlib, so the console gains no dependency for it.
+migrate, expire and reconcile, and it buys nothing here: the row is already the
+authority — every request looks the builder up and a session for a deleted one
+is not a session — and the only blanket revocation we need is changing the
+secret. The signature is HMAC-SHA256 over the payload with `VD_SESSION_SECRET`,
+which is stdlib, so the console gains no dependency for it.
+
+Anybody may sign up; exactly one person is the administrator, and that is the
+account that claimed the installation. See `administrator`.
 
 The CSRF token rides *inside* the signed payload rather than in a second cookie.
 Every POST form must echo it back in a hidden field, and because the cookie is
@@ -27,6 +31,7 @@ at; a tampered one fails for the same reason.
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hmac
 import json
 import secrets
@@ -75,6 +80,12 @@ class Operator:
     builder_id: uuid.UUID
     email: str
     csrf: str
+    # Whether this is the account that claimed the installation. Deliberately
+    # not in the cookie: a claim in a token is a claim that outlives the fact
+    # it was made about, and this one decides who may read and delete other
+    # people's apps. `require_operator` works it out from the database on every
+    # request, which is also why there is no route that grants it.
+    is_admin: bool = False
 
 
 @dataclass
@@ -233,6 +244,11 @@ async def require_operator(
     if builder is None:
         raise NotLoggedIn(request)
 
+    boss = await administrator(session)
+    operator = dataclasses.replace(
+        operator, is_admin=boss is not None and boss.id == builder.id
+    )
+
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         form = await request.form()
         sent = form.get(CSRF_FIELD)
@@ -245,15 +261,29 @@ async def require_operator(
     return operator
 
 
-async def sole_builder(session: AsyncSession) -> Builder | None:
-    """The one operator of this installation, if it has one yet.
+async def administrator(session: AsyncSession) -> Builder | None:
+    """The account that claimed this installation, if anybody has.
+
+    Two questions, one answer. "Has this been set up?" decides whether the
+    setup page is served. "Who is the administrator?" decides who may see other
+    people's apps and delete them.
+
+    It is the oldest row rather than a column, and that is the point: there is
+    no flag to flip, so there is no route, form or bug that can make a second
+    person an administrator. The ordering is explicit because `LIMIT 1` over an
+    unordered select is whichever row Postgres felt like, and "who owns this
+    installation" is not a question that may have two answers on two requests.
 
     Returns `None` rather than inventing a builder. "Nobody has set this up"
     and "this is who set it up" are different answers and the console behaves
-    differently for each: the first gets the setup page, the second gets a
-    login form.
+    differently for each.
     """
-    return (await session.execute(select(Builder).limit(1))).scalar_one_or_none()
+    return (
+        await session.execute(
+            # `id` as a tiebreak, because two rows can share a timestamp.
+            select(Builder).order_by(Builder.created_at, Builder.id).limit(1)
+        )
+    ).scalar_one_or_none()
 
 
 async def check_password(session: AsyncSession, *, email: str, password: str) -> Builder | None:

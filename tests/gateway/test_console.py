@@ -27,6 +27,7 @@ from sqlalchemy import select
 from control_plane.app import create_app
 from control_plane.config import DEFAULT_APP_DSN, ControlPlaneConfig
 from control_plane.gateway_client import KEY_HEADER, TIMEOUT, GatewayClient
+from control_plane.web import routes as web
 from control_plane.models import (
     ActionStatus,
     Agent,
@@ -133,8 +134,8 @@ class Browser(httpx.AsyncClient):
         landed = await self.post("/login", data={"email": email, "password": password})
         # A refused login also renders 200 — it re-renders the login page — so
         # the status is not the evidence. Where it ended up is.
-        assert landed.url.path == "/", landed.url
-        home = await self.get("/")
+        assert landed.url.path == web.HOME, landed.url
+        home = await self.get(web.HOME)
         assert home.status_code == 200, home.text
         found = re.search(r'name="csrf" value="([^"]+)"', home.text)
         assert found, "the console rendered a form with no CSRF token in it"

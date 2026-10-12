@@ -137,6 +137,25 @@ async def _host_port(gate: str) -> str:
     return port or ""
 
 
+async def _endpoint(config: ControlPlaneConfig, gate: str) -> str:
+    """The address *this worker* can probe the gate on, before it has a route.
+
+    Two answers, because the worker is in two different places depending on how
+    the platform is installed — see `ControlPlaneConfig.worker_in_container`.
+
+    Containerised, this is the gate's container name on `NETWORK`, which needs
+    no published port and so cannot be reached from the host at all. On a
+    laptop it is the port the gate publishes on the host's loopback, and `""`
+    when the gate is not running: there is then no port that reaches it, and
+    inventing one would be a lie the health gate would spend thirty seconds
+    discovering.
+    """
+    if config.worker_in_container:
+        return f"http://{gate}:{GATE_PORT}"
+    port = await _host_port(gate)
+    return f"http://127.0.0.1:{port}" if port else ""
+
+
 async def apps(config: ControlPlaneConfig) -> list[str]:
     """Every app this machine has containers for.
 
@@ -182,20 +201,15 @@ async def read(
     still reported, because "live in the database with nothing listening" is
     precisely the state the reconciler has to be able to name.
     """
-    del config
     gate, app = _gate(app_id, generation), _app(app_id, generation)
     deployment_id = await container.inspect(
         gate, f'{{{{index .Config.Labels "{gen.DEPLOYMENT_LABEL}"}}}}'
     )
     if deployment_id is None:
         return None
-    port = await _host_port(gate)
     return Running(
         app_id=app_id,
-        # Empty when the gate is not running: there is then no port on this
-        # host that reaches it, and inventing one would be a lie the health
-        # gate would spend thirty seconds discovering.
-        endpoint=f"http://127.0.0.1:{port}" if port else "",
+        endpoint=await _endpoint(config, gate),
         upstream=f"{gate}:{GATE_PORT}",
         app_container=app,
         sidecar_container=gate,
@@ -583,10 +597,16 @@ async def start(
             env=_gate_env(config, app_id, gate_secret),
             network=NETWORK,
             labels=labels,
-            # Loopback, and port 0 so the host chooses. This is the worker's
-            # only way to probe the health gate; the app half gets no such
-            # line, which is the point.
-            publish=[f"127.0.0.1:0:{GATE_PORT}"],
+            # Loopback, and port 0 so the host chooses — the worker's only way
+            # to probe the health gate when it is a process on this host. The
+            # app half gets no such line, which is the point.
+            #
+            # Nothing at all when the worker is containerised: it is on
+            # `NETWORK` too and probes by container name, so a published port
+            # would be an address into the gate that exists for no reader.
+            publish=(
+                () if config.worker_in_container else [f"127.0.0.1:0:{GATE_PORT}"]
+            ),
         )
         await container.start_detached(
             image=config.app_image,
@@ -604,10 +624,9 @@ async def start(
             labels=labels,
         )
         await _wait_for_app(gate, app)
-        port = await _host_port(gate)
-        if not port:
+        endpoint = await _endpoint(config, gate)
+        if not endpoint:
             raise StartupFailed("The login gate published no port to reach it on.")
-        endpoint = f"http://127.0.0.1:{port}"
         await _wait_for_gate(gate, f"{endpoint}/__vd/health")
     except BaseException:
         await _keep_logs(logs, {app: "app.log", gate: "sidecar.log"})

@@ -77,20 +77,52 @@ def _page(request: Request, name: str, context: dict[str, Any]) -> Any:
     )
 
 
-async def _app_or_404(session: AsyncSession, app_id: str) -> App:
+async def _app_or_404(session: AsyncSession, app_id: str, me: Operator) -> App:
+    """The app behind this URL, if it is this operator's to touch.
+
+    The tenancy check lives here rather than in each handler because there are
+    seventeen handlers and they all reach an app the same way: by an id in the
+    path. With one account that check was invisible and this function did not
+    have it. The moment anybody could sign up it became the only thing standing
+    between a stranger and somebody else's deploy button, their people, their
+    agent keys and their settings — all of which are reached by guessing an
+    eight-character id.
+
+    404 and not 403. 403 would be an answer: "that app exists, it is not
+    yours". The id is short enough to probe, so existence is itself worth not
+    confirming, and there is nothing a person can do with the difference.
+
+    The administrator is allowed through, because an installation's owner has
+    to be able to see what strangers have pushed to their box and remove it.
+    That is the whole of the privilege: `is_admin` is derived from the database
+    on every request by `auth.require_operator` and there is no route that
+    grants it.
+    """
     app = (
         await session.execute(select(App).where(App.app_id == app_id))
     ).scalar_one_or_none()
     if app is None:
         raise HTTPException(status_code=404, detail="no such app")
+    if app.builder_id != me.builder_id and not me.is_admin:
+        raise HTTPException(status_code=404, detail="no such app")
     return app
 
 
-async def _deployment_or_404(session: AsyncSession, deployment_id: uuid.UUID) -> Deployment:
+async def _deployment_or_404(
+    session: AsyncSession, deployment_id: uuid.UUID, me: Operator
+) -> tuple[Deployment, App]:
+    """A deployment and its app, both checked, because every caller needs both.
+
+    Ownership is decided by the app and never by the deployment, so there is
+    one definition of "yours" rather than two that can drift apart.
+    """
     deployment = await session.get(Deployment, deployment_id)
     if deployment is None:
         raise HTTPException(status_code=404, detail="no such deployment")
-    return deployment
+    app = await session.get(App, deployment.app_id)
+    if app is None or (app.builder_id != me.builder_id and not me.is_admin):
+        raise HTTPException(status_code=404, detail="no such deployment")
+    return deployment, app
 
 
 # ---------------------------------------------------------------------------
@@ -102,20 +134,50 @@ async def _deployment_or_404(session: AsyncSession, deployment_id: uuid.UUID) ->
 # ---------------------------------------------------------------------------
 
 
+# Where somebody who is logged in belongs. The console used to live at `/`,
+# which left nowhere to put a page explaining the product; a public landing
+# page and a private app list cannot both be the root. Moving the console is
+# the version of that which keeps every refusal explicit: `/` is public and
+# answers everybody the same, and a request to `/dashboard` with a forged
+# cookie is still turned down in words rather than quietly handed a brochure.
+HOME = "/dashboard"
+
+
 def _safe_next(value: str | None) -> str:
     # Only a path. `?next=https://elsewhere` on a login page is an open
     # redirect that arrives wearing our own hostname, which is the shape every
     # credential-phishing link wants.
     if not value or not value.startswith("/") or value.startswith("//"):
-        return "/"
+        return HOME
     return value
+
+
+@public.get("/", response_class=HTMLResponse)
+async def landing(request: Request) -> Any:
+    """What the product is, for somebody who has never seen it.
+
+    Public, and the only page that is public on purpose rather than by
+    necessity. It takes no session and reads nothing from the database, so
+    there is nothing here to get wrong about who may see what. Its two buttons
+    go to `/signup` and `/login`, and if nobody has claimed this installation
+    yet `/signup` is what redirects to `/setup` — the question "is this set up"
+    is answered in one place rather than on the brochure as well.
+
+    A visitor who already has a session is sent on to their apps instead. The
+    cookie's signature is enough for that, because it is a convenience and not
+    a decision: if it is valid but the builder has been deleted, `/dashboard`
+    refuses on arrival, which is where that refusal belongs.
+    """
+    if auth.sessions(request).read(request) is not None:
+        return _redirect(HOME)
+    return templates.TemplateResponse(request, "landing.html", {})
 
 
 @public.get("/login", response_class=HTMLResponse)
 async def login_page(
     request: Request, session: Session, next: str | None = None, said: str | None = None
 ) -> Any:
-    if await auth.sole_builder(session) is None:
+    if await auth.administrator(session) is None:
         return _redirect("/setup")
     return templates.TemplateResponse(
         request, "login.html", {"next": _safe_next(next), "said": said}
@@ -128,7 +190,7 @@ async def login(
     session: Session,
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
-    next: Annotated[str, Form()] = "/",
+    next: Annotated[str, Form()] = HOME,
 ) -> Any:
     """One answer for every failure, and a throttle in front of it.
 
@@ -156,13 +218,22 @@ async def login(
 
 @public.get("/setup", response_class=HTMLResponse)
 async def setup_page(request: Request, session: Session) -> Any:
-    """Open exactly once per installation, and closed by the row it creates.
+    """Claiming the installation. Open exactly once, closed by the row it makes.
+
+    Not the same door as `/signup`, even though both create a builder and both
+    log you in. The difference is what the first row means: the oldest builder
+    is the administrator (`auth.administrator`), and that is a thing a person
+    should do on a page that says so rather than discover by having been first
+    through a generic sign-up form.
 
     Closed by "a builder exists" rather than by a flag, so there is no state to
-    get out of step with reality and no way to reopen it except by deleting the
-    operator — which is a thing you would do deliberately, in the database.
+    get out of step with reality and no way to reopen it except by deleting
+    every operator — which is a thing you would do deliberately, in the
+    database. A box with a public address should never serve this page at all:
+    set `VD_BOOTSTRAP_EMAIL` and `VD_BOOTSTRAP_PASSWORD` and the console comes
+    up already claimed.
     """
-    if await auth.sole_builder(session) is not None:
+    if await auth.administrator(session) is not None:
         raise HTTPException(status_code=404, detail="this installation is set up")
     return templates.TemplateResponse(request, "setup.html", {"said": None})
 
@@ -174,7 +245,7 @@ async def setup(
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
 ) -> Any:
-    if await auth.sole_builder(session) is not None:
+    if await auth.administrator(session) is not None:
         # Not 404: a second person arriving here at the same moment as the
         # first is a race, not a wrong URL, and should be told which it was.
         raise HTTPException(status_code=409, detail="somebody already set this up")
@@ -186,7 +257,60 @@ async def setup(
         )
     builder = await service.create_builder(session, email=email, password=password)
     await session.commit()
-    response = _redirect("/")
+    response = _redirect(HOME)
+    auth.sessions(request).issue(response, builder)
+    return response
+
+
+@public.get("/signup", response_class=HTMLResponse)
+async def signup_page(request: Request, session: Session, said: str | None = None) -> Any:
+    if await auth.administrator(session) is None:
+        # Nothing has claimed this installation yet, and the first row decides
+        # who owns it. Send them to the page that says so.
+        return _redirect("/setup")
+    return templates.TemplateResponse(request, "signup.html", {"said": said})
+
+
+@public.post("/signup")
+async def signup(
+    request: Request,
+    session: Session,
+    email: Annotated[str, Form()],
+    password: Annotated[str, Form()],
+) -> Any:
+    """Anybody may have an account. Nobody gains anything by having one.
+
+    An account is permission to create apps of your own and nothing else:
+    `_app_or_404` scopes every app-shaped URL to the builder who owns it, and
+    administrator is not a thing an account can become — it is the oldest row,
+    with no column to flip and no route that writes one.
+
+    What signing up *does* mean is that this person can make the worker clone a
+    repository and run its migrations in a container on this machine. That is a
+    real privilege and the reason an open console belongs on a box you are
+    willing to lose, not next to anything else you care about.
+    """
+    if await auth.administrator(session) is None:
+        raise HTTPException(status_code=409, detail="this installation is not set up")
+    if len(password) < 12:
+        return await signup_page(
+            request, session, said="that password is too short — twelve characters at least"
+        )
+    who = email.strip().lower()
+    taken = (
+        await session.execute(select(Builder).where(Builder.email == who))
+    ).scalar_one_or_none()
+    if taken is not None:
+        # Said plainly. This console has no password reset and no way to tell
+        # an email apart from a user name, so "that one is taken" is advice
+        # somebody needs in order to get in, and hiding it protects an address
+        # that is already on the login form of every app they deploy.
+        return await signup_page(
+            request, session, said="there is already an account for that address"
+        )
+    builder = await service.create_builder(session, email=who, password=password)
+    await session.commit()
+    response = _redirect(HOME)
     auth.sessions(request).issue(response, builder)
     return response
 
@@ -203,10 +327,68 @@ async def logout(request: Request) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/", response_class=HTMLResponse)
-async def index(request: Request, session: Session) -> Any:
-    apps = (await session.execute(select(App).order_by(App.created_at))).scalars().all()
+@router.get(HOME, response_class=HTMLResponse)
+async def index(request: Request, session: Session, me: Me) -> Any:
+    """Your apps. Not everybody's.
+
+    The `where` clause is the whole change here and it is the one that matters:
+    this list used to be every app on the installation, which was correct when
+    there was exactly one account and became a directory of other people's work
+    the moment sign-up existed. The administrator's view of everything is a
+    separate page (`/admin`) so that nobody's ordinary working list quietly
+    depends on who they are.
+    """
+    apps = (
+        (
+            await session.execute(
+                select(App)
+                .where(App.builder_id == me.builder_id)
+                .order_by(App.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
     return _page(request, "apps.html", {"apps": apps})
+
+
+@router.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request, session: Session, me: Me) -> Any:
+    """Everybody who has signed up, and everything they have pushed.
+
+    The administrator's one extra page. It exists because an installation with
+    open sign-up is a machine strangers run their code on, and the person whose
+    machine it is has to be able to see who did and take it away.
+
+    403 rather than 404 for somebody who is not the administrator, which is the
+    opposite of what `_app_or_404` does, and deliberately: this URL is fixed
+    and public knowledge, so pretending it does not exist fools nobody. What is
+    worth hiding is whether a *particular app id* exists, and that is the
+    question `_app_or_404` is careful about.
+    """
+    if not me.is_admin:
+        raise HTTPException(status_code=403, detail="that page is the administrator's")
+    builders = (
+        (await session.execute(select(Builder).order_by(Builder.created_at)))
+        .scalars()
+        .all()
+    )
+    apps = (await session.execute(select(App).order_by(App.created_at))).scalars().all()
+    by_builder: dict[uuid.UUID, list[App]] = {}
+    for app in apps:
+        by_builder.setdefault(app.builder_id, []).append(app)
+    return _page(
+        request,
+        "admin.html",
+        {
+            "builders": builders,
+            "apps": by_builder,
+            # The oldest row is the administrator, so it is the first of these.
+            # Printed rather than inferred by the template: the rule lives in
+            # `auth.administrator` and nowhere else.
+            "boss": builders[0] if builders else None,
+        },
+    )
 
 
 @router.post("/apps")
@@ -230,9 +412,10 @@ async def app_page(
     request: Request,
     app_id: str,
     session: Session,
+    me: Me,
     config: Annotated[ControlPlaneConfig, Depends(get_config)],
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     deployments = (
         (
             await session.execute(
@@ -267,6 +450,11 @@ async def app_page(
             # that needs to see the value again.
             "env_names": sorted(service.app_env(config, app_id)),
             "env_error": request.query_params.get("env_error"),
+            # The administrator looking at somebody else's app. Shown, because
+            # a page that lets you delete another person's work should say
+            # whose it is before you do.
+            "theirs": app.builder_id != me.builder_id,
+            "owner": await session.get(Builder, app.builder_id),
         },
     )
 
@@ -275,6 +463,7 @@ async def app_page(
 async def set_env(
     app_id: str,
     session: Session,
+    me: Me,
     config: Annotated[ControlPlaneConfig, Depends(get_config)],
     env: Annotated[str, Form()],
 ) -> Any:
@@ -283,7 +472,7 @@ async def set_env(
     A refusal comes back on the page in words, because the names this turns down
     are exactly the ones a builder would otherwise keep retrying.
     """
-    await _app_or_404(session, app_id)
+    await _app_or_404(session, app_id, me)
     try:
         service.set_app_env(config, app_id, appenv.parse(env))
     except appenv.InvalidEnv as refused:
@@ -296,9 +485,12 @@ async def deploy(
     request: Request,
     app_id: str,
     session: Session,
+    me: Me,
     ref: Annotated[str, Form()],
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
+    if app.status == "deleting":
+        raise HTTPException(status_code=409, detail="this app is being removed")
     form = await request.form()
     answers: dict[str, Any] = {}
     for question in BASE_QUESTIONS:
@@ -322,9 +514,9 @@ async def deployment_page(
     request: Request,
     deployment_id: uuid.UUID,
     session: Session,
+    me: Me,
 ) -> Any:
-    deployment = await _deployment_or_404(session, deployment_id)
-    app = await session.get(App, deployment.app_id)
+    deployment, app = await _deployment_or_404(session, deployment_id, me)
     model = (
         await session.execute(
             select(AccessModel).where(AccessModel.deployment_id == deployment.id)
@@ -359,8 +551,9 @@ async def answer(
     request: Request,
     deployment_id: uuid.UUID,
     session: Session,
+    me: Me,
 ) -> Any:
-    deployment = await _deployment_or_404(session, deployment_id)
+    deployment, _ = await _deployment_or_404(session, deployment_id, me)
     form = await request.form()
     # Follow-up ids are generated by the derivation (`owner.orders`,
     # `unlinked.plans`), so they are read straight off the form rather than
@@ -394,7 +587,7 @@ async def confirm(
     the record useless as evidence: "somebody confirmed this" is not what an
     access model's sign-off is for.
     """
-    deployment = await _deployment_or_404(session, deployment_id)
+    deployment, _ = await _deployment_or_404(session, deployment_id, me)
     try:
         await service.confirm_model(
             session, deployment=deployment, confirmed_by=me.email
@@ -409,16 +602,53 @@ async def confirm(
 async def add_user(
     app_id: str,
     session: Session,
+    me: Me,
     email: Annotated[str, Form()],
     password: Annotated[str, Form()],
     role: Annotated[str, Form()] = "member",
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     await service.add_app_user(
         session, app=app, email=email, password=password, role=role
     )
     await session.commit()
     return _redirect(f"/apps/{app.app_id}")
+
+
+@router.post("/apps/{app_id}/delete")
+async def delete_app(
+    app_id: str,
+    session: Session,
+    me: Me,
+    confirm: Annotated[str, Form()],
+) -> Any:
+    """Remove an app for good. The owner, or the administrator.
+
+    The typed confirmation is checked here and not only in the browser, because
+    a required field is a convenience and this is not a convenience: what
+    happens next drops two schemas and four roles and there is nothing to
+    restore them from. Typing the id is the one thing a mis-click cannot do.
+
+    The work itself is a job, not a request. Stopping containers and dropping
+    schemas takes seconds to tens of seconds and must survive the browser going
+    away halfway through — and a half-deleted app is exactly the state the
+    reconciler is already built to notice. `service.request_teardown` makes the
+    app undeployable and gives up its route in the same commit that queues the
+    job, so the important half of "deleted" is true before any worker has
+    picked it up.
+    """
+    app = await _app_or_404(session, app_id, me)
+    if confirm.strip() != app.app_id:
+        raise HTTPException(
+            status_code=400,
+            detail="that is not this app's id, so nothing was removed",
+        )
+    try:
+        await service.request_teardown(session, app=app)
+    except service.ServiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await session.commit()
+    return _redirect("/admin" if me.is_admin and app.builder_id != me.builder_id else HOME)
 
 
 # ---------------------------------------------------------------------------
@@ -488,8 +718,9 @@ async def agents_page(
     request: Request,
     app_id: str,
     session: Session,
+    me: Me,
 ) -> Any:
-    return await _agents_page(request, session, await _app_or_404(session, app_id))
+    return await _agents_page(request, session, await _app_or_404(session, app_id, me))
 
 
 @router.post("/apps/{app_id}/agents", response_class=HTMLResponse)
@@ -509,7 +740,7 @@ async def create_agent(
     history and in every log between here and there. The cost is that a refresh
     re-posts the form, and that is the better of the two.
     """
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     person = await session.get(AppUser, acts_for)
     if person is None or person.app_id != app.id:
         raise HTTPException(status_code=404, detail="no such person")
@@ -537,9 +768,10 @@ async def agent_page(
     app_id: str,
     agent_id: uuid.UUID,
     session: Session,
+    me: Me,
     refused: str | None = None,
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     agent = await _agent_or_404(session, app, agent_id)
     versions = (
         (
@@ -579,7 +811,7 @@ async def save_policy(
     policy_yaml: Annotated[str, Form()],
     high_risk_ack: Annotated[bool, Form()] = False,
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     agent = await _agent_or_404(session, app, agent_id)
     try:
         await service.save_policy(
@@ -604,8 +836,9 @@ async def revoke_agent(
     app_id: str,
     agent_id: uuid.UUID,
     session: Session,
+    me: Me,
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     agent = await _agent_or_404(session, app, agent_id)
     await service.revoke_agent(session, agent=agent)
     await session.commit()
@@ -616,9 +849,10 @@ async def revoke_agent(
 async def set_app_agents(
     app_id: str,
     session: Session,
+    me: Me,
     on: Annotated[bool, Form()],
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     await service.set_app_agents(session, app=app, on=on)
     await session.commit()
     return _redirect(f"/apps/{app.app_id}/agents")
@@ -628,14 +862,14 @@ async def set_app_agents(
 async def kill_switch(
     session: Session,
     on: Annotated[bool, Form()],
-    back: Annotated[str, Form()] = "/",
+    back: Annotated[str, Form()] = HOME,
 ) -> Any:
     """Every agent everywhere. 19.5."""
     await service.set_kill_switch(session, on=on)
     await session.commit()
     # Only a path, never whatever was posted: `back` comes from a form, and an
     # absolute URL there would make this an open redirect.
-    return _redirect(back if back.startswith("/") else "/")
+    return _redirect(back if back.startswith("/") else HOME)
 
 
 # ---------------------------------------------------------------------------
@@ -679,9 +913,10 @@ async def approvals_page(
     request: Request,
     app_id: str,
     session: Session,
+    me: Me,
     said: str | None = None,
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     waiting: list[dict[str, Any]] = []
     unavailable = None
     try:
@@ -711,6 +946,7 @@ async def decide(
     action_id: str,
     verdict: str,
     session: Session,
+    me: Me,
     approver: Annotated[str, Form()],
     back: Annotated[str, Form()] = "",
 ) -> Any:
@@ -721,7 +957,7 @@ async def decide(
     checks the switches are still off — on the same code path an agent's own
     call takes.
     """
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     try:
         answer = await _gateway(request).decide(
             action_id, verdict=verdict, approver=approver
@@ -738,9 +974,10 @@ async def activity_page(
     request: Request,
     app_id: str,
     session: Session,
+    me: Me,
     said: str | None = None,
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     rows: list[dict[str, Any]] = []
     unavailable = None
     try:
@@ -786,10 +1023,11 @@ async def evidence_page(
     request: Request,
     app_id: str,
     session: Session,
+    me: Me,
     since: str | None = None,
     until: str | None = None,
 ) -> Any:
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     report = None
     unavailable = None
     try:
@@ -816,6 +1054,7 @@ async def evidence_json(
     request: Request,
     app_id: str,
     session: Session,
+    me: Me,
     since: str | None = None,
     until: str | None = None,
 ) -> Any:
@@ -824,7 +1063,7 @@ async def evidence_json(
     Not re-shaped on the way out: what an auditor downloads is what the gateway
     computed from `audit_log`, so the page and the file cannot disagree.
     """
-    app = await _app_or_404(session, app_id)
+    app = await _app_or_404(session, app_id, me)
     try:
         report = await _gateway(request).evidence(
             app.id, since=_when(since), until=_when(until)

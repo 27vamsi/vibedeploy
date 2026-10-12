@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import secrets as _secrets
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,7 +61,6 @@ class DeployBlocked(RuntimeError):
 @dataclass(frozen=True)
 class Provisioned:
     roles: AppRoles
-    fresh: bool
 
 
 @dataclass(frozen=True)
@@ -115,7 +115,7 @@ async def ensure_roles(
             runtime_password=stored["password"],
             agent_password=agent["password"],
         )
-        return Provisioned(roles=roles, fresh=False)
+        return Provisioned(roles=roles)
 
     roles = AppRoles.generate(app_id)
     await create_app_roles(admin, roles)
@@ -142,7 +142,7 @@ async def ensure_roles(
         secret_store.secret_name(app_id, secret_store.SIDECAR),
         {"identity_key": _secrets.token_hex(32), "session_key": _secrets.token_hex(32)},
     )
-    return Provisioned(roles=roles, fresh=True)
+    return Provisioned(roles=roles)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +151,24 @@ async def ensure_roles(
 
 OUT_IN_CONTAINER = "/vd/out"
 RESULT_IN_CONTAINER = f"{OUT_IN_CONTAINER}/migrate-result.json"
+
+# The network this one task gets, and the only task that gets it. The default
+# bridge is right on a laptop, where the customer database is a port on the
+# host's loopback and `host.docker.internal` reaches it.
+#
+# It is wrong on a Linux box twice over: that rewriting has nothing to rewrite
+# to, and the database there is a compose service whose name resolves on no
+# network this container was on — which is how a prod deploy got as far as a
+# passed attack suite and then failed with `Name or service not known`.
+#
+# Its own variable rather than `VD_BUILD_NETWORK` because the two tasks are not
+# interchangeable, and sharing one would quietly undo both halves: the build
+# job must *not* reach the customer database, and this task must. And not
+# `VD_APP_NETWORK` either — that one carries Caddy, the control plane and every
+# running app's gate. This task runs code we have never read while holding the
+# `migrator` role, the one credential that bypasses RLS, so the network it is
+# on should contain the database and nothing else.
+MIGRATE_NETWORK = os.environ.get("VD_MIGRATE_NETWORK") or "bridge"
 
 
 async def run_migration_task(
@@ -174,11 +192,17 @@ async def run_migration_task(
     # app's migrations get a writable mount with nothing of ours in it.
     out_dir = workdir / "migrate"
     out_dir.mkdir(parents=True, exist_ok=True)
+    # Group-writable, because the writer is the build job's uid and not ours.
+    # Without this the container cannot write its own result, and the failure
+    # that reaches a builder is `MIGRATION_TASK_FAILED` — the generic sentence —
+    # for every cause, including the ones this file took trouble to word.
+    os.chmod(out_dir, 0o770)
     result_path = out_dir / "migrate-result.json"
 
     outcome = await container.run(
         image=config.build_image,
         command=["python", "-m", "buildjob.migrate_task"],
+        network=MIGRATE_NETWORK,
         mounts={
             REPO_ROOT / "buildjob": "/vd/src/buildjob",
             REPO_ROOT / "kernel": "/vd/src/kernel",
@@ -228,8 +252,6 @@ async def enforce(
     admin: asyncpg.Connection,
     roles: AppRoles,
     model: Mapping[str, Any],
-    *,
-    fresh: bool,
 ) -> Enforced:
     """Hash, then protect, then check what we actually built."""
     await reassign_objects_to_owner(admin, roles)
@@ -238,12 +260,15 @@ async def enforce(
     if schema_hash(graph) != model.get("schema_hash"):
         raise DeployBlocked(SCHEMA_CHANGED)
 
-    if fresh:
-        # `vd_user_id()` and `vd_role()` are created once per schema and the
-        # policies are written against them. A later deploy finds them already
-        # there; a key type that changed would change the schema hash first and
-        # never reach here.
-        await create_helpers(admin, roles, key_type=model["principal"]["key_type"])
+    # `vd_user_id()` and `vd_role()` are what every policy is written against,
+    # so they are stated on every deploy and not only on the one that created
+    # the schema. `fresh` used to gate this, and it is the wrong question: it
+    # means "this run made the roles", not "this schema has the helpers". A
+    # first deploy that provisioned and then blocked — in the migration step,
+    # say — left an app that could never deploy again, because every later run
+    # saw `fresh=False` and then wrote policies calling a function that was
+    # never created. `helpers.sql` is `CREATE OR REPLACE` for this.
+    await create_helpers(admin, roles, key_type=model["principal"]["key_type"])
 
     await apply_model(admin, roles, model)
 

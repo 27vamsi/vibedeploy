@@ -223,14 +223,48 @@ def _table(config: ControlPlaneConfig, routes: list[Route]) -> dict:
     }
 
 
+# A `proxy_admin_url` of `unix:///run/.../admin.sock` means the admin API has
+# no network address at all, which is the only way to keep it away from the
+# containers Caddy must share a network with.
+#
+# It has to share one: Caddy dials an app's gate by container name, and Docker
+# resolves a name only on a network both ends are on. So for as long as the
+# admin API was a port, every app -- and every app's unreviewed code -- could
+# reach the one endpoint that rewrites the whole route table, and `origins` is
+# no defence because the Host header is the caller's to choose. A socket is
+# reachable only by a process the file is mounted into, and in
+# `infra/prod/docker-compose.yml` that is the worker and nothing else.
+UNIX_SCHEME = "unix://"
+
+# Over a socket the authority is never resolved, but it is still sent, and
+# Caddy checks it against its `origins`. `localhost` is what the prod Caddyfile
+# allows.
+UNIX_AUTHORITY = "http://localhost"
+
+
+def _client(config: ControlPlaneConfig) -> tuple[httpx.AsyncClient, str]:
+    """The admin client, and the base URL to use with it."""
+    admin = config.proxy_admin_url
+    if admin.startswith(UNIX_SCHEME):
+        socket = admin[len(UNIX_SCHEME) :]
+        transport = httpx.AsyncHTTPTransport(uds=socket)
+        return httpx.AsyncClient(timeout=TIMEOUT, transport=transport), UNIX_AUTHORITY
+    return httpx.AsyncClient(timeout=TIMEOUT), admin
+
+
 async def _admin(
     config: ControlPlaneConfig, method: str, path: str, body: dict | None = None
 ) -> httpx.Response:
-    url = f"{config.proxy_admin_url}{path}"
+    client, base = _client(config)
     try:
-        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            response = await client.request(method, url, json=body)
-    except httpx.HTTPError as exc:
+        async with client:
+            response = await client.request(method, f"{base}{path}", json=body)
+    except (httpx.HTTPError, OSError) as exc:
+        # `OSError` because a socket that is missing, or that this process may
+        # not write to, fails before HTTP starts -- and "the proxy is not
+        # reachable" is the same answer either way. Without this, a permission
+        # problem on the socket would come out of a deploy as a bare traceback
+        # instead of the sentence below.
         raise ProxyUnavailable(NO_PROXY) from exc
     if response.status_code >= 400:
         raise ProxyUnavailable(

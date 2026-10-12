@@ -72,6 +72,11 @@ def _in_prod(env: Mapping[str, str]) -> bool:
     return (env.get("VD_ENV") or "").strip().lower() in ("prod", "production")
 
 
+def _truthy(value: str | None) -> bool:
+    """The same three spellings `VD_MIGRATE_ON_BOOT` accepts."""
+    return (value or "").strip().lower() in ("1", "true", "yes")
+
+
 def _secret(env: Mapping[str, str], name: str, local: str = "") -> str:
     """Required in prod, whatever the laptop default is otherwise."""
     if _in_prod(env):
@@ -203,6 +208,22 @@ class ControlPlaneConfig:
     # enough that a laptop is not spending itself on a sweep that finds nothing.
     reconcile_interval: float = 10.0
 
+    # Whether the worker itself is in a container, which decides how it reaches
+    # an app's login gate before that app has a route.
+    #
+    # It is one fact with two consequences, which is why it is not two knobs.
+    # On a laptop the worker is a process on the host, so the gate publishes a
+    # port on `127.0.0.1` and the worker probes that. In `infra/prod` the worker
+    # is a container, where `127.0.0.1` is the worker — so a published host port
+    # is both unreachable (a port bound to the host's loopback is not reachable
+    # from the bridge, which is what `container.reachable_from_container`'s own
+    # caveat says) and pointless. There the gate publishes nothing at all and is
+    # probed by container name on `VD_APP_NETWORK`.
+    #
+    # Getting this wrong is loud, not subtle: every deploy fails in the health
+    # gate, which is the correct direction to fail in.
+    worker_in_container: bool = False
+
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ControlPlaneConfig":
         env = os.environ if env is None else env
@@ -257,6 +278,7 @@ class ControlPlaneConfig:
             health_timeout=float(env.get("VD_HEALTH_TIMEOUT") or 30.0),
             drain_seconds=float(env.get("VD_DRAIN_SECONDS") or 2.0),
             reconcile_interval=float(env.get("VD_RECONCILE_INTERVAL") or 10.0),
+            worker_in_container=_truthy(env.get("VD_WORKER_IN_CONTAINER")),
         )
 
     @property

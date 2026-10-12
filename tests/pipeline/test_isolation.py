@@ -156,6 +156,35 @@ def test_an_app_that_joins_the_gates_namespace_is_not_given_a_resolver():
     assert "--add-host" in ordinary
 
 
+def test_every_container_is_bounded():
+    """Not an isolation claim — a blast-radius one.
+
+    Several apps share one host, and the kernel's OOM killer chooses its victim
+    by heuristic: an app that allocates without limit is as likely to take down
+    the worker or Postgres as itself. These four flags make the offender the
+    one that dies. Asserted for both shapes because they are set in the one
+    place every `docker run` in this file goes through, and the way to lose
+    them is for a later caller to build its own argv instead.
+    """
+    for argv in (
+        container.docker_run_argv(image="x", command=["true"], mounts={}, env={}),
+        container.docker_run_argv(
+            image="x",
+            command=["true"],
+            mounts={},
+            env={},
+            network="container:vd-sidecar-g1",
+            rm=False,
+        ),
+    ):
+        assert argv[argv.index("--memory") + 1] == container.CONTAINER_MEMORY
+        assert argv[argv.index("--pids-limit") + 1] == container.CONTAINER_PIDS
+        assert argv[argv.index("--cpus") + 1] == container.CONTAINER_CPUS
+        # Equal to `--memory`, so the limit cannot be exceeded slowly by
+        # swapping. A larger value here would make the memory limit advisory.
+        assert argv[argv.index("--memory-swap") + 1] == container.CONTAINER_MEMORY
+
+
 def test_only_the_gate_is_published():
     published = container.docker_run_argv(
         image="x",

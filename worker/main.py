@@ -43,13 +43,14 @@ from control_plane.config import ControlPlaneConfig
 from control_plane.db import make_engine, make_sessionmaker
 from control_plane.models import JobStatus
 from worker import reconcile
-from worker.pipeline import Sessions, Verdict, deploy, users
+from worker.pipeline import Sessions, Verdict, deploy, teardown, users
 
 IDLE = 0.5
 
 HANDLERS = {
     jobs.KIND_DEPLOY: deploy.handle,
     jobs.KIND_ADD_USER: users.handle,
+    jobs.KIND_TEARDOWN: teardown.handle,
 }
 
 

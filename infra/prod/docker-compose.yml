@@ -12,11 +12,39 @@
 # the paths the host mounts and the paths the processes are told about cannot
 # disagree.
 #
-# **What is published to the internet is three ports and no more**: 80 and 443
-# on Caddy, and nothing else anywhere. Postgres, the throwaway build database,
-# Caddy's admin API, the console and the gateway all answer on the compose
-# network only. That is asserted here rather than described in the runbook,
-# because a `ports:` line is the only form of that claim anybody can check.
+# **What is published to the internet is two ports and no more**: 80 and 443 on
+# Caddy, and nothing else anywhere. Postgres, the throwaway build database, the
+# console and the gateway have no `ports:` line, and Caddy's admin API has no
+# port at all (see below). That is asserted here rather than described in the
+# runbook, because a `ports:` line is the only form of that claim anybody can
+# check.
+#
+# **Three networks, because "not published to the host" is not isolation.**
+# Everything used to share one, and that was wrong in a way worth naming: Caddy
+# must share a network with every app's login gate (it dials the gate by
+# container name, and Docker resolves names only on a shared network), and a
+# gate shares its network namespace with the app container. So one flat network
+# meant every deployed app could reach `caddy:2019` and rewrite the whole route
+# table, and every app's unreviewed migrations could reach the real customer
+# database and the gateway. The split:
+#
+#   - `core`  — the platform's own: postgres, control plane, worker, gateway.
+#               No app and no build job is ever on it.
+#   - `apps`  — Caddy, the login gates, and postgres, because an app connects to
+#               its own schema. This is the network untrusted app code sits on,
+#               so the only things reachable from it are a proxy's public ports,
+#               a database that answers to RLS, and the control plane's cookie
+#               lookup (which wants `VD_SIDECAR_API_KEY`).
+#   - `build` — the throwaway database and the build job, and the control plane
+#               because the build job posts its callback there. An app's own
+#               migrations cannot see the customer database at all.
+#
+# Caddy's admin API is a unix socket in the `caddy_admin` volume, mounted into
+# the worker alone. A network split could not have protected it: Caddy has to be
+# on `apps` to do its job. See `infra/prod/Caddyfile`.
+#
+# `VD_APP_NETWORK` and `VD_BUILD_NETWORK` in `.env` must name the two below —
+# `vibedeploy_apps` and `vibedeploy_build`, since `name:` prefixes them.
 #
 # The trust boundary, stated once: **the worker has the Docker socket.** It
 # needs it — it starts the build job that runs app migrations and the two
@@ -79,6 +107,17 @@ services:
       timeout: 3s
       retries: 30
     restart: unless-stopped
+    # `apps` as well as `core`, because an app connects to its own schema with
+    # its own `runtime` role. That is not a hole in the split: a connection from
+    # an app is exactly what every RLS policy in the product is written against,
+    # and it is the one reachable thing on `apps` that is *supposed* to be.
+    # And `migrate`, which has nothing else on it. That is the network the one
+    # task that applies an app's own migrations to this database is given, and
+    # the reason it is not `build` is that the build job must never reach here.
+    networks:
+      - core
+      - apps
+      - migrate
     command:
       - postgres
       - -c
@@ -104,6 +143,11 @@ services:
       timeout: 3s
       retries: 30
     restart: unless-stopped
+    # `build` only. This is the instance a container running code we have never
+    # read is handed admin of, so the fewer names it shares a network with, the
+    # smaller that gift is.
+    networks:
+      - build
 
   # PgBouncer is deliberately absent, and the absence is worth a paragraph
   # because `infra/local` has one.
@@ -123,9 +167,13 @@ services:
   #
   # Its route table is not in the Caddyfile and never was. It is written over
   # the admin API from what the control plane's database says is live, which is
-  # what lets the reconciler re-assert it rather than trust it — and the admin
-  # API is reachable from this network only, because it can rewrite the whole
-  # configuration.
+  # what lets the reconciler re-assert it rather than trust it — and that API
+  # can rewrite the whole configuration, so it is a unix socket in a volume the
+  # worker alone mounts rather than a port on a network it shares with apps.
+  #
+  # Only on `apps`, which is also the reason the socket exists: this service has
+  # to be resolvable by, and able to resolve, every login gate — and a gate
+  # shares its netns with unreviewed app code.
   caddy:
     image: caddy:2
     ports:
@@ -133,6 +181,8 @@ services:
       - "443:443"
     environment:
       VD_ACME_EMAIL: ${VD_ACME_EMAIL}
+    networks:
+      - apps
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Named, and the one volume here that must survive: it holds the
@@ -140,10 +190,25 @@ services:
       # fresh set of issuance requests against a rate limit.
       - caddy_data:/data
       - caddy_config:/config
+      # The admin API. A volume rather than a bind mount so that the socket's
+      # directory is writable by Caddy without anybody chowning a host path,
+      # and so that the only way to reach it is to be named in a `volumes:`
+      # line — which, besides this service, only the worker is.
+      - caddy_admin:/run/caddy-admin
     healthcheck:
-      # The admin API, not 443: with no routes written yet there is nothing on
-      # 443 to answer, and "no apps are deployed" is not unhealthy.
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      # Weaker than the TCP version it replaces, and worth being explicit about:
+      # this proves Caddy loaded its config far enough to create the admin
+      # socket, not that the socket answers. `wget` cannot speak to a unix
+      # socket and this image has no `curl`, so the alternative was shipping a
+      # client in here to health-check a thing the worker checks anyway —
+      # `proxy.require` runs before every release and blocks the deploy with a
+      # sentence if the admin API does not answer. This line exists so that
+      # `depends_on: service_healthy` means "Caddy started", which is all the
+      # ordering needs.
+      #
+      # Not 443: with no routes written yet nothing is listening there, and "no
+      # apps are deployed" is not unhealthy.
+      test: ["CMD", "test", "-S", "/run/caddy-admin/admin.sock"]
       interval: 5s
       timeout: 3s
       retries: 30
@@ -158,6 +223,17 @@ services:
   # holds a Postgres advisory lock across the whole upgrade.
   control-plane:
     <<: *platform
+    # On all three, because it is the hub every other half talks to: `core` for
+    # postgres and for the worker and gateway, `apps` so a login gate can ask
+    # whose cookie this is (and so Caddy can route the console), `build` so the
+    # build job can post its one-shot callback. Reachable from untrusted code on
+    # two of the three, which is why none of its endpoints are open: the gate
+    # path wants `VD_SIDECAR_API_KEY`, the callback wants an unspent
+    # `BuildToken`, and everything else wants an operator session.
+    networks:
+      - core
+      - apps
+      - build
     command:
       - python
       - -m
@@ -186,6 +262,11 @@ services:
   # `vd/apps/*/agent-*` and the console holds none of it.
   gateway:
     <<: *platform
+    # `core` only. It holds every app's `agent-*` secret, and the console
+    # reaches it by name from there; nothing on `apps` or `build` has any
+    # business resolving it.
+    networks:
+      - core
     command:
       - python
       - -m
@@ -215,11 +296,26 @@ services:
     # product rests on is stated at the top of this file.
     group_add:
       - ${VD_DOCKER_GID}
+    # `core` and `apps`. The second one is not optional and the reason is the
+    # cutover: the health gate probes a new generation *before* it has a route,
+    # so there is no way to reach it through Caddy yet, and `VD_WORKER_IN_
+    # CONTAINER=1` makes that probe the gate's container name — which resolves
+    # only on the network the gate is on.
+    #
+    # Being on `apps` costs nothing a reader should worry about: this service
+    # listens on no port, so there is nothing on it for app code to reach.
+    # Not on `build`: the worker never dials what the build job uses.
+    networks:
+      - core
+      - apps
     volumes:
       - ${VD_ROOT}:${VD_ROOT}:ro
       - ${VD_STATE_ROOT}:${VD_STATE_ROOT}
       # The trust boundary. Nothing else in this file gets this line.
       - /var/run/docker.sock:/var/run/docker.sock
+      # The other thing nothing else gets: the proxy's admin socket, which is
+      # why this is the only process that can publish a route.
+      - caddy_admin:/run/caddy-admin
     depends_on:
       postgres:
         condition: service_healthy
@@ -240,3 +336,23 @@ volumes:
   postgres_data:
   caddy_data:
   caddy_config:
+  # Carries one file: Caddy's admin socket. Mounted into `caddy` and `worker`
+  # and no other service — which is the whole of the access control on the one
+  # API that can rewrite where every app's traffic goes.
+  caddy_admin:
+
+# See the header for what each of these is for. The short version: `core` is
+# ours, `apps` is where unreviewed app code sits, `build` is where unreviewed
+# migrations are proved against a throwaway database, `migrate` is where the
+# same migrations are applied to the real one. The point of four is that the
+# last three cannot resolve most of the first, and that `build` and `migrate`
+# cannot resolve each other's database.
+#
+# No service declares `migrate` except `postgres`: it exists for a container
+# the worker starts with `docker run`, which is why nothing in this file joins
+# it and why `VD_MIGRATE_NETWORK` has to name it by its prefixed name.
+networks:
+  core:
+  apps:
+  build:
+  migrate:

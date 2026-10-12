@@ -43,10 +43,18 @@ SECRET = "a-session-secret-that-is-not-a-default-anybody-has"
 OPERATOR = "operator@tests.invalid"
 PASSWORD = "a-password-long-enough"
 
+# Where a signed-in operator lands. Taken from the module rather than written
+# out, because the whole point of these tests is that the *guard* is on the
+# router and not on a list of paths somebody typed.
+HOME = web.HOME
+
 # The only paths a stranger may reach, and the whole list. `/health` is here so
 # that a restart policy and a load balancer can see the process; it says nothing
-# about any app.
-PUBLIC = {"/login", "/setup", "/health"}
+# about any app. `/` is the landing page and `/signup` is how anybody else gets
+# an account — both argued for here, where the list can be read: an account is
+# permission to create apps of your own, and `_app_or_404` is what makes sure
+# it is permission to see nothing else.
+PUBLIC = {"/", "/login", "/signup", "/setup", "/health"}
 
 # Stand-ins for the path parameters. Valid shapes on purpose: a 422 for a
 # malformed UUID would be a refusal that proves nothing about the login, so
@@ -131,7 +139,7 @@ async def _signed_in(client: httpx.AsyncClient) -> str:
     landed = await client.post(
         "/login", data={"email": OPERATOR, "password": PASSWORD}, follow_redirects=True
     )
-    assert landed.url.path == "/", landed.url
+    assert landed.url.path == HOME, landed.url
     found = re.search(r'name="csrf" value="([^"]+)"', landed.text)
     assert found, "a form rendered with no CSRF token in it"
     return found.group(1)
@@ -183,7 +191,7 @@ async def test_a_forged_cookie_is_not_a_session(console):
         good = _issued(real, builder)
 
         client.cookies.set(auth.COOKIE, good)
-        assert (await client.get("/")).status_code == 200, "our own cookie was refused"
+        assert (await client.get(HOME)).status_code == 200, "our own cookie was refused"
 
         head, _, tail = good.partition(".")
         forgeries = {
@@ -202,7 +210,7 @@ async def test_a_forged_cookie_is_not_a_session(console):
 
     for why, token in forgeries.items():
         client.cookies.set(auth.COOKIE, token)
-        answer = await client.get("/")
+        answer = await client.get(HOME)
         assert answer.status_code in (303, 401), f"{why} was accepted"
 
 
@@ -232,7 +240,7 @@ async def test_a_session_for_a_builder_that_is_gone_is_not_a_session(console):
     """
     app, client = console
     csrf = await _signed_in(client)
-    assert (await client.get("/")).status_code == 200
+    assert (await client.get(HOME)).status_code == 200
 
     async with app.state.sessionmaker() as session:
         builder = (await session.execute(select(Builder))).scalar_one()
@@ -240,7 +248,7 @@ async def test_a_session_for_a_builder_that_is_gone_is_not_a_session(console):
         await session.commit()
 
     assert csrf  # the cookie is unchanged and still correctly signed
-    assert (await client.get("/")).status_code == 401
+    assert (await client.get(HOME)).status_code == 401
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +308,7 @@ async def test_the_wrong_password_is_not_a_session(console):
         follow_redirects=True,
     )
     assert said.url.path == "/login"
-    assert (await client.get("/")).status_code == 401
+    assert (await client.get(HOME)).status_code == 401
 
 
 async def test_a_login_that_does_not_exist_says_the_same_thing(console):
@@ -343,7 +351,7 @@ async def test_a_good_login_forgets_the_bad_ones(console):
     for _ in range(auth.ATTEMPTS - 1):
         await client.post("/login", data={"email": OPERATOR, "password": "not-it"})
     await _signed_in(client)
-    assert (await client.get("/")).status_code == 200
+    assert (await client.get(HOME)).status_code == 200
 
 
 async def test_logging_out_ends_it(console):
@@ -351,7 +359,7 @@ async def test_logging_out_ends_it(console):
     csrf = await _signed_in(client)
     gone = await client.post("/logout", data={"csrf": csrf})
     assert gone.status_code == 303
-    assert (await client.get("/")).status_code == 401
+    assert (await client.get(HOME)).status_code == 401
 
 
 async def test_the_login_page_will_not_send_you_elsewhere(console):
@@ -369,7 +377,7 @@ async def test_the_login_page_will_not_send_you_elsewhere(console):
             "next": "https://elsewhere.invalid/",
         },
     )
-    assert landed.headers["location"] == "/"
+    assert landed.headers["location"] == HOME
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +393,7 @@ async def test_no_operator_means_the_setup_page_not_an_invented_one(empty):
     so, and creates nothing by being looked at.
     """
     engine, client = empty
-    sent = await client.get("/", headers={"accept": "text/html"})
+    sent = await client.get(HOME, headers={"accept": "text/html"})
     assert sent.status_code == 303
     assert sent.headers["location"].startswith("/login")
 
@@ -404,7 +412,7 @@ async def test_setup_closes_behind_the_first_operator(empty):
     made = await client.post(
         "/setup", data={"email": OPERATOR, "password": PASSWORD}, follow_redirects=True
     )
-    assert made.url.path == "/"
+    assert made.url.path == HOME
 
     # And it is shut, permanently, by the row it just made.
     assert (await client.get("/setup")).status_code == 404
@@ -452,7 +460,7 @@ async def test_the_environment_can_own_the_installation_before_anybody_sees_it(
                 data={"email": "boot@tests.invalid", "password": PASSWORD},
                 follow_redirects=True,
             )
-            assert landed.url.path == "/"
+            assert landed.url.path == HOME
 
 
 async def test_the_bootstrap_is_not_a_standing_password_reset(_queue_engine, tmp_path):

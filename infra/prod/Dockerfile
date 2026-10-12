@@ -22,14 +22,18 @@ FROM python:3.12-slim
 # `docker` because it starts the build job and every deployed app, and
 # `ca-certificates` because both of those reach the internet over TLS.
 #
-# `docker.io` is the client *and* the daemon package on Debian; only the client
-# binary is used here and no daemon is started in this image. It talks to the
-# host's daemon over the socket the compose file mounts into the worker alone.
+# `docker-cli` and not `docker.io`: on Debian 13 the client was split out, and
+# `docker.io` now installs the daemon side and `docker-init` *without*
+# `/usr/bin/docker`. That is the binary `worker/pipeline/container.py` shells
+# out to, so getting this wrong is not a fat image, it is every deploy failing
+# at the first container start. No daemon is started here either way — the
+# client talks to the host's, over the socket the compose file mounts into the
+# worker alone.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
-        docker.io \
+        docker-cli \
     && rm -rf /var/lib/apt/lists/*
 
 # Mirrors `[project].dependencies` in pyproject.toml, with exact versions
@@ -61,6 +65,13 @@ ENV PYTHONUNBUFFERED=1 \
 #
 # The uid is fixed and above the apprt and buildjob ones so that files left in
 # the state root by one release are still readable by the next.
-RUN useradd --create-home --uid 10000 vd
+#
+# The gid is given rather than allocated, because it is a number another image
+# names: the build job runs as uid 10001 with *this* group as a supplementary
+# one, which is how it can read the 0640 spec the worker writes for it and
+# nothing else in the state root. `useradd` alone would have picked the next
+# free gid, which is 10000 today by luck and not by anything written down.
+RUN groupadd --gid 10000 vd \
+ && useradd --create-home --uid 10000 --gid 10000 vd
 
 USER vd

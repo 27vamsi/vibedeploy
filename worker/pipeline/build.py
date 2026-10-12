@@ -101,9 +101,21 @@ async def discard_deps(workdir: Path) -> None:
 
 
 def write_spec(path: Path, spec: Mapping[str, Any]) -> Path:
-    """The build job's instructions, including its one-time token, at 0600."""
+    """The build job's instructions, including its one-time token, at 0640.
+
+    Group-readable and not world-readable, because the two processes are two
+    containers running as two different users: the worker writes this as uid
+    10000 and the build job reads it as uid 10001, whose supplementary group is
+    the worker's. At 0600 — which is what this was — no build could read its own
+    spec, and the only reason that was not obvious on a laptop is that Docker
+    Desktop's bind mounts have no Unix modes to honour.
+
+    The group is the narrow part: it says the build job may read this file, not
+    that it may read anything else of ours. Everything in the state root that is
+    not meant for it, app secrets included, stays 0600 (`control_plane.secrets`).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump(dict(spec), handle)
     return path

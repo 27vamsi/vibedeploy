@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}create an account · vibedeploy{% endblock %}
+{% block main_class %}entry{% endblock %}
+{% block chrome %}{% endblock %}
+{% block body %}
+<div class="entry-card">
+  <a class="mark" href="/" style="margin-bottom:2.5rem">vibedeploy</a>
+  <h1>Create an account</h1>
+
+  <p class="small muted">You get your own apps and nobody else&rsquo;s. The
+    installation&rsquo;s administrator can see that you signed up and can delete your
+    apps; they are the only person who can.</p>
+
+  {% if said %}<p class="blocked">{{ said }}</p>{% endif %}
+
+  <form method="post" action="/signup">
+    <label>email
+      <input name="email" type="email" autocomplete="username" required autofocus></label>
+    <label>password
+      <input name="password" type="password" autocomplete="new-password"
+             minlength="12" required>
+    </label>
+    <p class="small muted" style="margin:-.5rem 0 1rem">Twelve characters at
+      least. Hashed with argon2id &mdash; the same path your app&rsquo;s own people go
+      through.</p>
+    <button type="submit">create account</button>
+  </form>
+
+  <p class="foot">Already have one? <a href="/login">sign in</a>.</p>
+</div>
+{% endblock %}

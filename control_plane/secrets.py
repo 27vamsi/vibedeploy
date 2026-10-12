@@ -34,6 +34,8 @@ from typing import TYPE_CHECKING, Any, Mapping
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from kernel.render import validate_app_id
+
 if TYPE_CHECKING:
     from control_plane.config import ControlPlaneConfig
 
@@ -161,6 +163,31 @@ class SecretStore:
         merged = {**current, **fields}
         self.put(name, merged)
         return merged
+
+    def forget(self, app_id: str) -> list[str]:
+        """Delete every secret belonging to one app. Returns what it removed.
+
+        By directory rather than by the four names this module knows, because
+        it does not know all of them: `service.set_app_env` writes an app's own
+        settings here too, under names a builder chose. Deleting the names we
+        can enumerate would leave a builder's Stripe key on the disk of an app
+        that no longer exists.
+
+        The path is `vd/apps/<app_id>`, and `app_id` has already been narrowed
+        to `app_[a-z0-9_]` by `kernel.render.validate_app_id` before any row
+        carries it, so no component of it can climb out of the root.
+        """
+        validate_app_id(app_id)
+        directory = self.root / "vd" / "apps" / app_id
+        if not directory.is_dir():
+            return []
+        gone = []
+        for path in sorted(directory.iterdir()):
+            if path.is_file():
+                path.unlink()
+                gone.append(path.name)
+        directory.rmdir()
+        return gone
 
 
 def store_for(config: ControlPlaneConfig) -> SecretStore:

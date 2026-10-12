@@ -62,6 +62,27 @@ DEFAULT_HOST_ALIAS = "host.docker.internal"
 # already resolves, so no `--add-host` is wanted either.
 HOST_ALIAS = os.environ.get("VD_CONTAINER_HOST") or DEFAULT_HOST_ALIAS
 
+# What one container may take from the box, applied to every `docker run` here:
+# an app, its gate, a build job and the migration task alike.
+#
+# These are not a sandbox and nothing here pretends otherwise — the isolation
+# claims are elsewhere. They bound one specific failure, which is the mundane
+# one: an app with a runaway loop, or migrations that read a table into memory,
+# taking down every *other* app on the host along with themselves. Without a
+# limit the kernel picks the victim by heuristic and it is as likely to be the
+# worker or Postgres as the offender.
+#
+# `--memory-swap` equal to `--memory` means no swap at all for the container,
+# so the limit is the limit; a box's swap is there to keep our own processes
+# alive under pressure, not to let one app exceed its allowance slowly.
+#
+# Generous rather than tight, and every one of them overridable, because the
+# cost of guessing low is a build that fails for a reason that looks like the
+# app's fault. `pip install` is the hungriest thing that runs in here.
+CONTAINER_MEMORY = os.environ.get("VD_CONTAINER_MEMORY") or "768m"
+CONTAINER_PIDS = os.environ.get("VD_CONTAINER_PIDS") or "256"
+CONTAINER_CPUS = os.environ.get("VD_CONTAINER_CPUS") or "1.0"
+
 LOOPBACK = ("127.0.0.1", "localhost", "[::1]", "0.0.0.0")
 
 
@@ -195,7 +216,21 @@ def docker_run_argv(
     same generation cannot both win, whatever either of them believed about the
     other.
     """
-    argv = [DOCKER, "run", "--network", network]
+    argv = [
+        DOCKER,
+        "run",
+        "--network",
+        network,
+        # See the constants: one app's runaway loop must not pick the victim.
+        "--memory",
+        CONTAINER_MEMORY,
+        "--memory-swap",
+        CONTAINER_MEMORY,
+        "--pids-limit",
+        CONTAINER_PIDS,
+        "--cpus",
+        CONTAINER_CPUS,
+    ]
     if rm:
         argv.append("--rm")
     if detach:

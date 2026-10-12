@@ -1,20 +1,28 @@
 {% extends "base.html" %}
 {% block title %}first run · vibedeploy{% endblock %}
+{% block main_class %}entry{% endblock %}
+{% block chrome %}{% endblock %}
 {% block body %}
-<h1>First run</h1>
+<div class="entry-card">
+  <a class="mark" href="/" style="margin-bottom:2.5rem">vibedeploy</a>
+  <h1>First run</h1>
 
-<p>This installation has no operator yet. Whoever fills this in becomes it, and
-then this page is gone for good.</p>
+  <p class="small muted">This installation has no administrator yet. Whoever
+    fills this in becomes it, and then this page is gone for good.</p>
 
-{% if said %}<p class="blocked">{{ said }}</p>{% endif %}
+  {% if said %}<p class="blocked">{{ said }}</p>{% endif %}
 
-<form method="post" action="/setup">
-  <label>email <input name="email" type="email" autocomplete="username" required autofocus></label>
-  <label>password <input name="password" type="password" autocomplete="new-password" required></label>
-  <button type="submit">create the operator</button>
-</form>
+  <form method="post" action="/setup">
+    <label>email
+      <input name="email" type="email" autocomplete="username" required autofocus></label>
+    <label>password
+      <input name="password" type="password" autocomplete="new-password" required></label>
+    <button type="submit">claim this installation</button>
+  </form>
 
-<p class="muted">On a box with a public address, set <code>VD_BOOTSTRAP_EMAIL</code>
-and <code>VD_BOOTSTRAP_PASSWORD</code> instead and never serve this page: open,
-it hands the installation to the first stranger who finds it.</p>
+  <p class="foot">On a box with a public address, set
+    <code>VD_BOOTSTRAP_EMAIL</code> and <code>VD_BOOTSTRAP_PASSWORD</code>
+    instead and never serve this page: open, it hands the installation to the
+    first stranger who finds it.</p>
+</div>
 {% endblock %}

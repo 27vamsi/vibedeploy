@@ -49,6 +49,7 @@ from control_plane.models import (
     SCHEMA,
     VerificationRun,
 )
+from control_plane.web import routes as web
 from kernel.provision import AppRoles, drop_app_roles
 from worker import main as worker_main
 from worker.runtimes import proxy, serving
@@ -123,7 +124,7 @@ class Console(httpx.AsyncClient):
         landed = await self.post("/login", data={"email": email, "password": password})
         # A refused login also renders 200 — it re-renders the login page with
         # a message — so the status is not the evidence. Where it ended up is.
-        assert landed.url.path == "/", f"the login was refused: {landed.url}"
+        assert landed.url.path == web.HOME, f"the login was refused: {landed.url}"
         found = re.search(r'name="csrf" value="([^"]+)"', landed.text)
         assert found, "the console rendered a page with no CSRF token in it"
         self.csrf = found.group(1)

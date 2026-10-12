@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+{% block title %}everyone · vibedeploy{% endblock %}
+{% block body %}
+<h1>Everyone</h1>
+<p class="muted small">Every account on this installation and everything it has
+  pushed. This page is the administrator&rsquo;s and nobody else&rsquo;s.</p>
+
+<div class="panel">
+  <p class="muted small" style="margin:0">The administrator is the oldest
+    account, which is the one that claimed this installation. There is no
+    column for it and no form that sets it, so there is no way for a second
+    person to become one.</p>
+</div>
+
+<h2>Accounts</h2>
+<table>
+  <thead>
+    <tr><th>Email</th><th>Signed up</th><th>Apps</th></tr>
+  </thead>
+  <tbody>
+    {% for builder in builders %}
+    <tr>
+      <td>{{ builder.email }}
+        {% if boss and builder.id == boss.id %}
+        <span class="pill is-live">administrator</span>
+        {% endif %}
+      </td>
+      <td class="muted">{{ builder.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td class="num muted">{{ apps.get(builder.id, []) | length }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Apps</h2>
+{% set any_apps = [] %}
+{% for builder in builders %}{% if apps.get(builder.id) %}
+{% set _ = any_apps.append(1) %}
+<h3 class="small">{{ builder.email }}</h3>
+<table>
+  <thead>
+    <tr><th>Name</th><th>Id</th><th>Protection</th><th>Source</th><th>State</th></tr>
+  </thead>
+  <tbody>
+    {% for app in apps[builder.id] %}
+    <tr>
+      <td><a href="/apps/{{ app.app_id }}">{{ app.name }}</a></td>
+      <td><code>{{ app.app_id }}</code></td>
+      <td>
+        {% if app.protection == 'protected' %}
+        <span class="pill is-live">protected</span>
+        {% elif app.protection == 'unprotected' %}
+        <span class="pill is-blocked">unprotected</span>
+        {% else %}
+        <span class="pill">{{ app.protection }}</span>
+        {% endif %}
+      </td>
+      <td class="muted">{{ app.repo }}</td>
+      <td>
+        {% if app.status == 'deleting' %}
+        <span class="pill is-blocked">deleting</span>
+        {% else %}
+        <span class="muted">{{ app.status }}</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}{% endfor %}
+{% if not any_apps %}
+<p class="muted">Nobody has added an app yet.</p>
+{% else %}
+<p class="muted small">To remove one, open it and use the panel at the bottom of
+  its page. Removing is the same action for you as for its owner: the
+  containers stop, both schemas and all four database roles are dropped, the
+  secrets are deleted and the row goes. The audit chain is left alone &mdash;
+  deleting an app is not a way to erase the record of what its agents did.</p>
+{% endif %}
+{% endblock %}

@@ -49,7 +49,13 @@ from control_plane.models import Job, JobStatus
 
 KIND_DEPLOY = "deploy"
 KIND_ADD_USER = "add_user"
-ALL_KINDS = (KIND_DEPLOY, KIND_ADD_USER)
+# Removing an app for good: stop its containers, drop its schemas and roles,
+# delete its secrets, then delete the row. Deliberately enqueued with a null
+# `app_id` and the app's string id in the payload instead — `Job.app_id` is a
+# foreign key with ON DELETE CASCADE, so a teardown job that named its own app
+# would be deleted by the row it is in the middle of deleting.
+KIND_TEARDOWN = "teardown"
+ALL_KINDS = (KIND_DEPLOY, KIND_ADD_USER, KIND_TEARDOWN)
 
 # How long a claim is good for without being renewed. Short, because it is
 # renewed: this is the delay between a worker being killed and its deployment

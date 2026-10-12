@@ -20,13 +20,34 @@
 # it is written onto listens on 443. That is why `VD_PUBLIC_SCHEME=https` has
 # to be set before the first deploy rather than after.
 #
-# `admin 0.0.0.0:2019` because the API is reached from the worker's container,
-# and inside this one `localhost` is Caddy. It is deliberately **not published
-# to the host** in `docker-compose.yml`: this API can rewrite the entire proxy
-# configuration, so it is reachable from the compose network and nowhere else.
+# The admin API is on a **unix socket**, and that is the one line here that
+# differs from local for a security reason rather than a port-number one.
+#
+# It cannot be a TCP port on this box. Caddy dials each app's login gate by
+# container name, so Caddy must share a Docker network with every gate — and a
+# gate shares its network namespace with the app container, i.e. with code we
+# have never read. An admin port bound on that network hands any deployed app a
+# rewrite of the entire route table: every app's traffic, the console's, and the
+# hostnames certificates get issued for. `origins` is not a defence, because the
+# Host header belongs to whoever sends it.
+#
+# A socket has no address on any network. It is mounted into the worker alone
+# (the `caddy_admin` volume in docker-compose.yml) — the only process that
+# writes routes.
+#
+# `|0666` without apology: the mount is the access control, and the socket is in
+# a volume no other service gets. The alternative is running Caddy as the
+# worker's uid, which also means granting it CAP_NET_BIND_SERVICE for 80/443 and
+# moving the certificate store's ownership — real complexity to buy a mode bit
+# on a file nothing else can open.
+#
+# `origins localhost` because Caddy checks the Host header even over a socket,
+# and `proxy.UNIX_AUTHORITY` sends `localhost`.
 
 {
-	admin 0.0.0.0:2019
+	admin unix//run/caddy-admin/admin.sock|0666 {
+		origins localhost
+	}
 
 	# Where Let's Encrypt sends expiry warnings. Not optional in practice: an
 	# ACME account with no contact is how a renewal failure becomes an outage

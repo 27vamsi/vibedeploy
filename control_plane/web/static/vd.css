@@ -1,0 +1,518 @@
+/* The console's design system. One file, loaded by `base.html`.
+ *
+ * Served from disk rather than inlined in the template, because a stylesheet
+ * is the one asset here a browser can cache across every page of a deploy that
+ * is being watched by a 2-second poll.
+ *
+ * The look is an engineering dossier: hairlines, registration ticks, a dense
+ * monospaced body, and one acid accent that is spent only on things the
+ * product has actually proved. Nothing else is allowed to be lime.
+ */
+
+/* ------------------------------------------------------------------ tokens */
+
+:root {
+  --ink:        #eceae4;
+  --ink-dim:    #9a9ea8;
+  --ink-faint:  #676c77;
+
+  --bg:         #0a0b0d;
+  --bg-raise:   #101217;
+  --bg-sink:    #060708;
+
+  --rule:       rgba(236, 234, 228, 0.11);
+  --rule-hard:  rgba(236, 234, 228, 0.22);
+
+  /* Spent only on a proved claim, a live app, a passing check. */
+  --signal:     #c6f432;
+  --signal-dim: rgba(198, 244, 50, 0.14);
+
+  --stop:       #ff6243;
+  --stop-dim:   rgba(255, 98, 67, 0.12);
+  --hold:       #ffb34d;
+  --hold-dim:   rgba(255, 179, 77, 0.12);
+
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", "Cascadia Mono", Menlo, monospace;
+  --sans: "Instrument Sans", -apple-system, "Segoe UI", sans-serif;
+  --display: "Instrument Serif", Georgia, serif;
+
+  --step: 0.75rem;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 15px/1.6 var(--sans);
+  font-feature-settings: "ss01", "cv01";
+  /* A faint grid, so the page reads as drafting paper rather than a void. */
+  background-image:
+    linear-gradient(var(--rule) 1px, transparent 1px),
+    linear-gradient(90deg, var(--rule) 1px, transparent 1px);
+  background-size: 96px 96px, 96px 96px;
+  background-position: -1px -1px;
+}
+
+/* The grain. Fixed, so it does not slide as the page scrolls — which is what
+ * makes it read as film rather than as a tiled image. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  pointer-events: none;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ------------------------------------------------------------- the chrome */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem clamp(1rem, 4vw, 3rem);
+  border-bottom: 1px solid var(--rule-hard);
+  background: rgba(10, 11, 13, 0.82);
+  backdrop-filter: blur(14px);
+}
+
+.mark {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  color: var(--ink);
+  font: 400 21px/1 var(--display);
+  letter-spacing: 0.01em;
+  text-decoration: none;
+}
+
+.mark::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  background: var(--signal);
+  /* Not a circle. A square reads as a status lamp on a rack. */
+  box-shadow: 0 0 0 3px var(--signal-dim);
+  animation: pulse 3.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 3px var(--signal-dim); }
+  50%      { box-shadow: 0 0 0 6px rgba(198, 244, 50, 0.05); }
+}
+
+.topbar nav {
+  display: flex;
+  gap: 1.1rem;
+  margin-left: auto;
+  align-items: center;
+  font: 400 12px/1 var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.topbar nav a { color: var(--ink-dim); text-decoration: none; }
+.topbar nav a:hover { color: var(--signal); }
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font: 400 12px/1 var(--mono);
+  color: var(--ink-faint);
+}
+
+.who form { display: inline; margin: 0; }
+
+/* --------------------------------------------------------------- the page */
+
+main {
+  max-width: 62rem;
+  margin: 0 auto;
+  padding: clamp(2rem, 6vw, 4.5rem) clamp(1rem, 4vw, 3rem) 8rem;
+}
+
+/* The one display voice on the page. Serif, large, tight — it is the only
+ * thing here that is not monospaced or sans, and that is what makes a console
+ * page look composed rather than dumped. */
+h1 {
+  margin: 0 0 0.4rem;
+  font: 400 clamp(2.1rem, 5.5vw, 3.2rem)/0.98 var(--display);
+  letter-spacing: -0.015em;
+}
+
+h1 .at { color: var(--ink-faint); font-style: italic; }
+
+/* Section headings are labels, not headlines: small, lettered out, with the
+ * hairline that carries them across the page. */
+h2 {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin: 3.5rem 0 1.25rem;
+  font: 400 11px/1 var(--mono);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+h2::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+
+h3 {
+  margin: 1.75rem 0 0.6rem;
+  font: 500 14px/1.3 var(--sans);
+  letter-spacing: 0.01em;
+}
+
+p { margin: 0 0 1rem; max-width: 62ch; }
+
+a { color: var(--signal); text-decoration-color: var(--signal-dim); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--signal); }
+
+.muted { color: var(--ink-dim); }
+.small { font-size: 13px; }
+
+code, .mono {
+  font: 400 0.88em/1.5 var(--mono);
+  color: var(--ink);
+}
+
+code {
+  padding: 0.1em 0.35em;
+  background: var(--bg-raise);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  white-space: nowrap;
+}
+
+hr { border: 0; border-top: 1px solid var(--rule); margin: 2.5rem 0; }
+
+/* --------------------------------------------------------------- surfaces */
+
+/* Registration ticks in the corners instead of a border on all four sides.
+ * A full box around every group turns a dense page into a stack of crates;
+ * ticks say "this is one thing" at a fraction of the ink. */
+.panel {
+  position: relative;
+  padding: 1.5rem clamp(1rem, 3vw, 1.75rem);
+  background: linear-gradient(180deg, var(--bg-raise), var(--bg-sink));
+  border: 1px solid var(--rule);
+  margin: 0 0 1.25rem;
+}
+
+.panel::before, .panel::after {
+  content: "";
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--rule-hard);
+  pointer-events: none;
+}
+
+.panel::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+.panel::after { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+
+.panel > :last-child { margin-bottom: 0; }
+
+/* ---------------------------------------------------------------- verdicts */
+
+/* Three states, one shape. The bar on the left is the only thing that moves,
+ * because a builder reading this page is scanning for its colour and not for
+ * its wording. */
+.blocked, .live, .waiting {
+  position: relative;
+  padding: 1.1rem 1.35rem;
+  margin: 0 0 1.5rem;
+  border: 1px solid var(--rule);
+  border-left: 3px solid;
+  animation: rise 0.45s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.blocked { border-left-color: var(--stop);   background: var(--stop-dim); }
+.live    { border-left-color: var(--signal); background: var(--signal-dim); }
+.waiting { border-left-color: var(--hold);   background: var(--hold-dim); }
+
+.blocked h2, .live h2, .waiting h2 { margin: 0 0 0.5rem; }
+.blocked h2::after, .live h2::after, .waiting h2::after { display: none; }
+.blocked h2 { color: var(--stop); }
+.live h2 { color: var(--signal); }
+.waiting h2 { color: var(--hold); }
+.blocked > :last-child, .live > :last-child, .waiting > :last-child { margin-bottom: 0; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* A status word, wherever one appears. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.22rem 0.55rem;
+  border: 1px solid var(--rule-hard);
+  border-radius: 2px;
+  font: 400 11px/1.2 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+
+.pill::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  background: currentColor;
+}
+
+.pill.is-live    { color: var(--signal); border-color: rgba(198, 244, 50, 0.4); }
+.pill.is-blocked { color: var(--stop);   border-color: rgba(255, 98, 67, 0.4); }
+.pill.is-waiting { color: var(--hold);   border-color: rgba(255, 179, 77, 0.4); }
+.pill.is-moving  { color: var(--ink); }
+.pill.is-moving::before { animation: blink 1s steps(2, start) infinite; }
+
+@keyframes blink { 50% { opacity: 0.2; } }
+
+/* ------------------------------------------------------------------ tables */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 400 13px/1.5 var(--mono);
+}
+
+th {
+  text-align: left;
+  padding: 0 0.75rem 0.5rem 0;
+  border-bottom: 1px solid var(--rule-hard);
+  font: 400 10px/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+td {
+  padding: 0.65rem 0.75rem 0.65rem 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+tbody tr { transition: background 0.14s; }
+tbody tr:hover { background: rgba(236, 234, 228, 0.025); }
+td code { background: none; border: 0; padding: 0; }
+
+/* A number that is the point of the row. */
+.num { font-variant-numeric: tabular-nums; }
+.num.pass { color: var(--signal); }
+.num.fail { color: var(--stop); }
+.num.zero { color: var(--ink-faint); }
+
+/* ------------------------------------------------------------------- forms */
+
+form { margin: 0 0 1rem; }
+
+label {
+  display: block;
+  margin: 0 0 1rem;
+  font: 400 11px/1.4 var(--mono);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+input[type="text"], input[type="email"], input[type="password"],
+input:not([type]), textarea, select {
+  display: block;
+  width: 100%;
+  max-width: 34rem;
+  margin: 0.4rem 0 0;
+  padding: 0.6rem 0.7rem;
+  background: var(--bg-sink);
+  border: 1px solid var(--rule-hard);
+  border-radius: 2px;
+  color: var(--ink);
+  font: 400 14px/1.4 var(--mono);
+  letter-spacing: 0;
+  text-transform: none;
+  transition: border-color 0.14s, box-shadow 0.14s;
+}
+
+textarea { max-width: 46rem; resize: vertical; }
+
+input:focus, textarea:focus, select:focus {
+  outline: 0;
+  border-color: var(--signal);
+  box-shadow: 0 0 0 3px var(--signal-dim);
+}
+
+::placeholder { color: var(--ink-faint); }
+
+/* A set of choices. `fieldset`'s own border is dropped for the same reason
+ * `.panel` uses ticks: one question should not look like a crate either. */
+fieldset {
+  margin: 0 0 1.5rem;
+  padding: 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+  padding-top: 1rem;
+}
+
+legend {
+  padding: 0;
+  margin: 0 0 0.75rem;
+  font: 400 15px/1.4 var(--sans);
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* The radio rows. Clickable across their whole width, because a question with
+ * four options is answered by people on phones too. */
+fieldset label {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  margin: 0;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  font: 400 14px/1.4 var(--sans);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-dim);
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+
+fieldset label:hover { background: rgba(236, 234, 228, 0.03); color: var(--ink); }
+fieldset label:has(input:checked) {
+  color: var(--ink);
+  border-color: rgba(198, 244, 50, 0.35);
+  background: var(--signal-dim);
+}
+
+input[type="radio"], input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--signal);
+  flex: none;
+}
+
+button, .button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1.2rem;
+  background: var(--signal);
+  border: 1px solid var(--signal);
+  border-radius: 2px;
+  color: #0a0b0d;
+  font: 500 12px/1 var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.12s, box-shadow 0.12s, background 0.12s;
+}
+
+button:hover, .button:hover {
+  box-shadow: 0 0 0 4px var(--signal-dim);
+  transform: translateY(-1px);
+}
+
+button:active, .button:active { transform: none; }
+
+/* Secondary: anything that is not the one thing this page is for. */
+button.ghost, .button.ghost, .who button {
+  background: transparent;
+  border-color: var(--rule-hard);
+  color: var(--ink-dim);
+  padding: 0.4rem 0.75rem;
+  text-transform: none;
+  letter-spacing: 0.04em;
+}
+
+button.ghost:hover, .button.ghost:hover, .who button:hover {
+  color: var(--ink);
+  border-color: var(--ink-faint);
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------ lists */
+
+ul { padding-left: 1.1rem; max-width: 70ch; }
+li { margin: 0 0 0.45rem; }
+
+/* The derived rules, in a builder's own words. Marked rather than bulleted:
+ * these are the sentences the whole deploy is waiting on. */
+.rules { list-style: none; padding: 0; }
+
+.rules li {
+  position: relative;
+  padding: 0.6rem 0 0.6rem 1.6rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.rules li::before {
+  content: "→";
+  position: absolute;
+  left: 0;
+  color: var(--signal);
+  font: 400 13px/1.6 var(--mono);
+}
+
+/* A row of names: environment variables, roles, templates in use. */
+.chips { display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0; list-style: none; }
+.chips code { background: var(--bg-raise); }
+
+/* --------------------------------------------------------------- the entry */
+
+/* Login and signup. One narrow column, vertically centred, no chrome. */
+main.entry {
+  max-width: none;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 2rem 1.5rem;
+}
+
+.entry-card {
+  width: 100%;
+  max-width: 24rem;
+  animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.entry-card h1 { font-size: clamp(2rem, 7vw, 2.6rem); margin-bottom: 1.75rem; }
+.entry-card button { width: 100%; justify-content: center; margin-top: 0.5rem; }
+.entry-card .foot { margin: 1.75rem 0 0; font-size: 13px; color: var(--ink-faint); }
+
+/* ------------------------------------------------------------------ stagger */
+
+/* One orchestrated page load. `main > *` rather than a class on each element,
+ * so a new section joins the sequence without being told to. */
+@media (prefers-reduced-motion: no-preference) {
+  main > * { animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+  main > :nth-child(1) { animation-delay: 0.02s; }
+  main > :nth-child(2) { animation-delay: 0.06s; }
+  main > :nth-child(3) { animation-delay: 0.1s; }
+  main > :nth-child(4) { animation-delay: 0.14s; }
+  main > :nth-child(5) { animation-delay: 0.18s; }
+  main > :nth-child(n+6) { animation-delay: 0.22s; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}

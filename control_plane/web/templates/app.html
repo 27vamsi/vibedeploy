@@ -1,105 +1,173 @@
 {% extends "base.html" %}
-{% block title %}{{ app.name }}{% endblock %}
+{% block title %}{{ app.name }} · vibedeploy{% endblock %}
 {% block body %}
 <h1>{{ app.name }}</h1>
-<p class="muted"><code>{{ app.app_id }}</code> &middot; {{ app.repo }} &middot;
-  protection: {{ app.protection }}</p>
-<p>
-  <a href="/apps/{{ app.app_id }}/agents">Agents</a> &middot;
-  <a href="/apps/{{ app.app_id }}/approvals">Approvals</a> &middot;
-  <a href="/apps/{{ app.app_id }}/activity">Activity</a> &middot;
-  <a href="/apps/{{ app.app_id }}/evidence">Evidence</a> &middot;
-  <a href="/audit">Audit</a>
+<p class="muted small"><code>{{ app.app_id }}</code> &middot; {{ app.repo }}
+  &middot; {{ app.protection }}</p>
+
+{% if theirs %}
+<div class="waiting">
+  <h2>This is not your app</h2>
+  <p style="margin:0">It belongs to {{ owner.email if owner else "somebody else" }}.
+    You are seeing it because you are this installation&rsquo;s administrator.</p>
+</div>
+{% endif %}
+
+{% if app.status == 'deleting' %}
+<div class="blocked">
+  <h2>This app is being removed</h2>
+  <p style="margin:0">It has given up its address and cannot be deployed again.
+    A worker is stopping its containers and dropping its database roles; when
+    that finishes the app disappears from this list.</p>
+</div>
+{% endif %}
+
+<p class="small">
+  <a href="/apps/{{ app.app_id }}/agents">agents</a> &middot;
+  <a href="/apps/{{ app.app_id }}/approvals">approvals</a> &middot;
+  <a href="/apps/{{ app.app_id }}/activity">activity</a> &middot;
+  <a href="/apps/{{ app.app_id }}/evidence">evidence</a> &middot;
+  <a href="/audit">audit</a>
 </p>
 
 <h2>Deploy</h2>
-<form method="post" action="/apps/{{ app.app_id }}/deploy">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Branch, tag or commit <input name="ref" value="main" required></label>
-  <p class="muted">Use <code>working-tree</code> to deploy a local folder exactly
-    as it is on disk, uncommitted changes included. A <code>.env</code> next to
-    your code is never copied: the database is handed to the app by us.</p>
+<div class="panel">
+  {% if app.status == 'deleting' %}
+  <p class="muted" style="margin:0">Not while it is being removed.</p>
+  {% else %}
+  <form method="post" action="/apps/{{ app.app_id }}/deploy">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>branch, tag or commit <input name="ref" value="main" required></label>
+    <p class="muted small">Use <code>working-tree</code> to deploy a local folder
+      exactly as it is on disk, uncommitted changes included.</p>
 
-  {# Section 10. Asked once; the answers are reused, and only new or changed
-     tables produce follow-ups on later deployments. #}
-  {% for question in questions %}
-  <fieldset>
-    <legend>{{ question.text }}</legend>
-    {% for value, label in question.options %}
-    <label>
-      <input type="radio" name="{{ question.id }}" value="{{ value }}"
-             {% if answers.get(question.id) == value
-                or (question.id == 'sensitive' and answers.get('sensitive') == (value == 'yes')) %}checked{% endif %}
-             required>
-      {{ label }}
-    </label>
+    {# Section 10. Asked once; the answers are reused, and only new or changed
+       tables produce follow-ups on later deployments. #}
+    {% for question in questions %}
+    <fieldset>
+      <legend>{{ question.text }}</legend>
+      {% for value, label in question.options %}
+      <label>
+        <input type="radio" name="{{ question.id }}" value="{{ value }}"
+               {% if answers.get(question.id) == value
+                  or (question.id == 'sensitive' and answers.get('sensitive') == (value == 'yes')) %}checked{% endif %}
+               required>
+        {{ label }}
+      </label>
+      {% endfor %}
+    </fieldset>
     {% endfor %}
-  </fieldset>
-  {% endfor %}
 
-  <button type="submit">Deploy</button>
-</form>
-
-<h2>Settings</h2>
-<p class="muted">What your <code>.env</code> would have held. Paste it; the lines
-  are read the same way. Taken away at the next deploy, not this minute.</p>
-{% if env_error %}<p class="blocked">{{ env_error }}</p>{% endif %}
-{% if env_names %}
-<p>Set: {% for name in env_names %}<code>{{ name }}</code>{% if not loop.last %}, {% endif %}{% endfor %}</p>
-<p class="muted">Values are not shown, here or anywhere. Sending this form again
-  replaces the whole set, so leaving a name out removes it.</p>
-{% endif %}
-<form method="post" action="/apps/{{ app.app_id }}/env">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Settings
-    <textarea name="env" rows="5" cols="60"
-              placeholder="STRIPE_KEY=sk_live_...&#10;FEATURE_X=on"></textarea></label>
-  <p class="muted">Not yours to set: <code>DATABASE_URL</code> and
-    <code>VD_*</code> (we hand your app its database and tell it who is asking),
-    <code>PYTHON*</code>, <code>PATH</code>, <code>LD_*</code> and
-    <code>DYLD_*</code> (they decide which code runs at all).</p>
-  <button type="submit">Save settings</button>
-</form>
+    <button type="submit">deploy</button>
+  </form>
+  {% endif %}
+</div>
 
 <h2>Deployments</h2>
 {% if deployments %}
 <table>
-  <tr><th>Ref</th><th>Commit</th><th>Status</th><th>Why</th><th>When</th></tr>
-  {% for deployment in deployments %}
-  <tr>
-    <td><a href="/deployments/{{ deployment.id }}">{{ deployment.ref }}</a></td>
-    <td class="muted"><code>{{ (deployment.commit_sha or "")[:12] }}</code></td>
-    <td>{{ deployment.status }}</td>
-    <td class="muted">{{ deployment.blocked_reason or "" }}</td>
-    <td class="muted">{{ deployment.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
-  </tr>
-  {% endfor %}
+  <thead>
+    <tr><th>Ref</th><th>Commit</th><th>Status</th><th>Why</th><th>When</th></tr>
+  </thead>
+  <tbody>
+    {% for deployment in deployments %}
+    <tr>
+      <td><a href="/deployments/{{ deployment.id }}">{{ deployment.ref }}</a></td>
+      <td class="muted"><code>{{ (deployment.commit_sha or "")[:12] }}</code></td>
+      <td>
+        {% if deployment.status == 'live' %}
+        <span class="pill is-live">live</span>
+        {% elif deployment.status in ('blocked', 'error') %}
+        <span class="pill is-blocked">{{ deployment.status }}</span>
+        {% elif deployment.status in ('awaiting_answers', 'awaiting_confirmation') %}
+        <span class="pill is-waiting">{{ deployment.status }}</span>
+        {% else %}
+        <span class="pill is-moving">{{ deployment.status }}</span>
+        {% endif %}
+      </td>
+      <td class="muted">{{ deployment.blocked_reason or "" }}</td>
+      <td class="muted">{{ deployment.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
 </table>
 {% else %}
 <p class="muted">No deployments yet.</p>
 {% endif %}
 
+<h2>Settings</h2>
+<div class="panel">
+  <p class="muted small">What your <code>.env</code> would have held. Paste it;
+    the lines are read the same way. Taken away at the next deploy, not this
+    minute.</p>
+  {% if env_error %}<p class="blocked">{{ env_error }}</p>{% endif %}
+  {% if env_names %}
+  <p class="chips small">{% for name in env_names %}<code>{{ name }}</code>{% endfor %}</p>
+  <p class="muted small">Values are not shown, here or anywhere. Sending this
+    form again replaces the whole set, so leaving a name out removes it.</p>
+  {% endif %}
+  <form method="post" action="/apps/{{ app.app_id }}/env">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>settings
+      <textarea name="env" rows="5"
+                placeholder="STRIPE_KEY=sk_live_...&#10;FEATURE_X=on"></textarea></label>
+    <button type="submit">save settings</button>
+  </form>
+  <p class="muted small" style="margin:1rem 0 0">Not yours to set:
+    <code>DATABASE_URL</code> and <code>VD_*</code> (we hand your app its
+    database and tell it who is asking), <code>PYTHON*</code>,
+    <code>PATH</code>, <code>LD_*</code> and <code>DYLD_*</code> (they decide
+    which code runs at all).</p>
+</div>
+
 <h2>People</h2>
 {% if users %}
 <table>
-  <tr><th>Email</th><th>Role</th><th>Status</th></tr>
-  {% for user in users %}
-  <tr>
-    <td>{{ user.email }}</td>
-    <td>{{ user.role }}</td>
-    <td>{{ "not ready yet" if user.disabled else "can log in" }}</td>
-  </tr>
-  {% endfor %}
+  <thead><tr><th>Email</th><th>Role</th><th>Status</th></tr></thead>
+  <tbody>
+    {% for user in users %}
+    <tr>
+      <td>{{ user.email }}</td>
+      <td>{{ user.role }}</td>
+      <td class="muted">{{ "not ready yet" if user.disabled else "can log in" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
 </table>
 {% endif %}
 
-<form method="post" action="/apps/{{ app.app_id }}/users">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Email <input name="email" type="email" required></label>
-  <label>Password <input name="password" type="password" required></label>
-  <label>Role
-    <select name="role"><option value="member">member</option><option value="admin">admin</option></select>
-  </label>
-  <button type="submit">Add person</button>
-</form>
+<div class="panel">
+  <p class="muted small">The people an app&rsquo;s policies are written about. Each
+    one becomes a persona the attack suite runs as.</p>
+  <form method="post" action="/apps/{{ app.app_id }}/users">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>email <input name="email" type="email" required></label>
+    <label>password <input name="password" type="password" required></label>
+    <label>role
+      <select name="role">
+        <option value="member">member</option>
+        <option value="admin">admin</option>
+      </select>
+    </label>
+    <button type="submit">add person</button>
+  </form>
+</div>
+
+<h2>Remove</h2>
+<div class="panel">
+  {% if app.status == 'deleting' %}
+  <p class="muted" style="margin:0">Already on its way out.</p>
+  {% else %}
+  <p class="muted small">Stops the containers, takes the route away, drops this
+    app&rsquo;s two schemas and its four database roles, deletes its secrets and
+    forgets its deployments. Nothing about it survives, and none of it comes
+    back.</p>
+  <form method="post" action="/apps/{{ app.app_id }}/delete">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>type the app id to confirm
+      <input name="confirm" placeholder="{{ app.app_id }}" required></label>
+    <button type="submit" class="ghost">delete this app for good</button>
+  </form>
+  {% endif %}
+</div>
 {% endblock %}

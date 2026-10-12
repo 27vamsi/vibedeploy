@@ -104,17 +104,72 @@ async def create_app(
     repo: str,
     subdomain: str | None = None,
 ) -> App:
+    app_id = new_app_id()
     app = App(
         builder_id=builder.id,
-        app_id=new_app_id(),
+        app_id=app_id,
         name=name,
-        subdomain=subdomain or subdomain_for(name),
+        subdomain=subdomain or await _free_subdomain(session, name, app_id),
         repo=repo,
         protection=Protection.unknown.value,
     )
     session.add(app)
     await session.flush()
     return app
+
+
+async def _free_subdomain(session: AsyncSession, name: str, app_id: str) -> str:
+    """A hostname nobody else on this installation already has.
+
+    The subdomain is a unique column, because it is the address requests
+    arrive at and two apps cannot share one. With a single operator that was
+    invisible; with sign-up it is the first thing that breaks, because the
+    second person to call an app "todo" is not doing anything wrong and should
+    not meet a 500.
+
+    The fallback appends the app id's own random half rather than counting
+    upwards. Counting needs a loop and a race to go with it; this is one extra
+    query and the result is still something a person can read.
+    """
+    slug = subdomain_for(name)
+    taken = await session.execute(select(App.id).where(App.subdomain == slug).limit(1))
+    if taken.scalar_one_or_none() is None:
+        return slug
+    return f"{slug}-{app_id.removeprefix('app_')}"
+
+
+async def request_teardown(session: AsyncSession, *, app: App) -> None:
+    """Queue the removal of an app, and stop it being deployable immediately.
+
+    Two writes before the job, both of which matter on their own:
+
+    `status` becomes `deleting`, which is what the console reads to stop
+    offering a deploy button for something that is on its way out. A second
+    teardown request is refused on it as well, so a person clicking twice does
+    not get two jobs racing to drop the same roles.
+
+    `live_deployment_id` is cleared, which is the one that does real work: the
+    reconciler's idea of what should be running comes from that column, so from
+    this commit onwards this app's containers are generations nothing claims
+    and its route is a route the next `proxy.reassert` will not restate. The
+    job below does the same thing deliberately and immediately; clearing it
+    here is what makes the outcome the same if the job never runs at all.
+
+    The generation is bumped for the same reason a deploy bumps it: a worker
+    part way through deploying this app must not be able to publish a route to
+    it after this point.
+    """
+    if app.status == "deleting":
+        raise ServiceError("This app is already being removed.")
+    app.status = "deleting"
+    app.live_deployment_id = None
+    await generations.claim_generation(session, app)
+    await jobs.enqueue(
+        session,
+        kind=jobs.KIND_TEARDOWN,
+        # No `app_id=`: see `jobs.KIND_TEARDOWN`.
+        payload={"app_id": app.app_id, "name": app.name},
+    )
 
 
 async def start_deployment(

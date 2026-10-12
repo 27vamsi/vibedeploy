@@ -378,9 +378,7 @@ async def _release(
             migrations_path=stack.migrations_path or "",
             workdir=workdir,
         )
-        enforced = await enforce(
-            admin, provisioned.roles, model, fresh=provisioned.fresh
-        )
+        enforced = await enforce(admin, provisioned.roles, model)
     finally:
         await admin.close()
 

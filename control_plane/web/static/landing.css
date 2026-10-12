@@ -1,0 +1,427 @@
+/* The page a stranger sees first. Loaded after `vd.css`, which it inherits all
+ * its tokens from — there is one palette in this product, not two.
+ *
+ * The centrepiece is `.proof`: the product's one claim, animated. An app runs
+ * `select * from invoices` with no filter, and three different identities get
+ * three different answers out of it. Everything else on this page is a caption
+ * to that.
+ */
+
+body.landing {
+  /* The grid from `vd.css` is too busy behind this much type. */
+  background-image: none;
+}
+
+/* ------------------------------------------------------------------- shell */
+
+.landing main {
+  max-width: 72rem;
+  padding-bottom: 0;
+}
+
+.landing main > * { animation: none; }
+
+/* Sections reveal on approach. The class is added by the observer at the
+ * bottom of the page, so with no JavaScript everything is simply visible —
+ * a marketing page that needs a script to show its words is not a page. */
+.reveal { opacity: 0; transform: translateY(18px); }
+.reveal.seen {
+  opacity: 1;
+  transform: none;
+  transition: opacity 0.7s cubic-bezier(0.2, 0.8, 0.2, 1),
+              transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; }
+}
+
+section { padding: clamp(4rem, 11vw, 8rem) 0 0; }
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin: 0 0 1.5rem;
+  font: 400 11px/1 var(--mono);
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+.eyebrow::before {
+  content: "";
+  width: 28px;
+  height: 1px;
+  background: var(--signal);
+}
+
+/* ------------------------------------------------------------------- hero */
+
+.hero {
+  padding: clamp(3.5rem, 9vw, 7rem) 0 0;
+  position: relative;
+}
+
+/* A single wash of light behind the headline, placed off-centre. Centred, it
+ * would read as the purple-gradient hero every other tool has. */
+.hero::before {
+  content: "";
+  position: absolute;
+  top: -14rem;
+  right: -10rem;
+  width: 42rem;
+  height: 42rem;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(198, 244, 50, 0.07), transparent 62%);
+  animation: drift 18s ease-in-out infinite alternate;
+}
+
+@keyframes drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to   { transform: translate3d(-3rem, 2rem, 0) scale(1.12); }
+}
+
+.hero h1 {
+  position: relative;
+  max-width: 24ch;
+  margin: 0 0 1.5rem;
+  font: 400 clamp(2.6rem, 7.6vw, 5.4rem)/0.96 var(--display);
+  letter-spacing: -0.025em;
+}
+
+.hero h1 em {
+  font-style: italic;
+  color: var(--signal);
+}
+
+.lede {
+  max-width: 54ch;
+  margin: 0 0 2.5rem;
+  font-size: clamp(16px, 2.1vw, 19px);
+  line-height: 1.55;
+  color: var(--ink-dim);
+}
+
+.lede strong { color: var(--ink); font-weight: 500; }
+
+.cta { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.cta .button { padding: 0.8rem 1.5rem; }
+
+/* Staggered on load. One orchestration, four steps, then it is over. */
+@media (prefers-reduced-motion: no-preference) {
+  .hero > * { animation: rise 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .hero > :nth-child(1) { animation-delay: 0.05s; }
+  .hero > :nth-child(2) { animation-delay: 0.15s; }
+  .hero > :nth-child(3) { animation-delay: 0.28s; }
+  .hero > :nth-child(4) { animation-delay: 0.4s; }
+}
+
+/* ----------------------------------------------------------- the rule tape */
+
+/* The non-negotiables, scrolling. Texture, but true: every line in here is a
+ * rule the product refuses to deploy without. */
+.tape {
+  margin-top: clamp(3rem, 8vw, 5rem);
+  padding: 0.7rem 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  overflow: hidden;
+  mask-image: linear-gradient(90deg, transparent, #000 8%, #000 92%, transparent);
+}
+
+.tape-run {
+  display: flex;
+  width: max-content;
+  gap: 2.5rem;
+  animation: slide 42s linear infinite;
+  font: 400 11px/1 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+
+.tape-run span::before { content: "·"; margin-right: 2.5rem; color: var(--signal); }
+
+@keyframes slide {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+
+/* --------------------------------------------------------------- the proof */
+
+.proof {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  margin-top: 2rem;
+}
+
+@media (max-width: 760px) {
+  .proof { grid-template-columns: minmax(0, 1fr); }
+}
+
+.proof > div {
+  padding: clamp(1.25rem, 3vw, 1.9rem);
+  background: linear-gradient(180deg, var(--bg-raise), var(--bg-sink));
+}
+
+.proof-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 0 1.25rem;
+  font: 400 10px/1 var(--mono);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* The query. Deliberately the worst code a reviewer could find: no filter, no
+ * tenant column, nothing. That is the point of showing it. */
+.sql {
+  margin: 0;
+  font: 400 14px/1.9 var(--mono);
+  white-space: pre-wrap;
+  color: var(--ink);
+}
+
+.sql .kw { color: var(--ink-faint); }
+.sql .bad {
+  color: var(--stop);
+  text-decoration: underline;
+  text-decoration-style: wavy;
+  text-underline-offset: 4px;
+}
+
+.aside {
+  margin: 1.5rem 0 0;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+  color: var(--ink-faint);
+  max-width: none;
+}
+
+/* The answers. Three identities, one at a time, on a loop. */
+.takes { position: relative; min-height: 13.5rem; }
+
+.take {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  animation: take 13.5s steps(1, end) infinite;
+}
+
+.take:nth-child(1) { animation-delay: 0s; }
+.take:nth-child(2) { animation-delay: 4.5s; }
+.take:nth-child(3) { animation-delay: 9s; }
+
+/* `steps(1, end)` on the outer frame so the three never cross-fade into a
+ * muddle; the fade belongs to the rows inside, which stagger. */
+@keyframes take {
+  0%, 33.33%  { opacity: 1; visibility: visible; }
+  33.34%, 100% { opacity: 0; visibility: hidden; }
+}
+
+.who-is {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0 0 1rem;
+  font: 400 12px/1 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--ink);
+}
+
+.who-is b { font-weight: 500; }
+.who-is .as { color: var(--ink-faint); }
+
+.row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--rule);
+  font: 400 13px/1.4 var(--mono);
+  animation: rowin 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.take .row:nth-of-type(1) { animation-delay: 0.1s; }
+.take .row:nth-of-type(2) { animation-delay: 0.2s; }
+.take .row:nth-of-type(3) { animation-delay: 0.3s; }
+
+@keyframes rowin {
+  from { opacity: 0; transform: translateX(-8px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.row .tick { color: var(--signal); flex: none; width: 1rem; }
+.row .owner { color: var(--ink-faint); margin-left: auto; }
+
+.row.gone { color: var(--ink-faint); }
+.row.gone .tick { color: var(--stop); }
+.row.gone .what { text-decoration: line-through; text-decoration-color: var(--stop); }
+
+.verdict {
+  margin: 1.25rem 0 0;
+  font-size: 13px;
+  color: var(--ink-dim);
+  max-width: none;
+}
+
+.verdict b { color: var(--signal); font-weight: 400; font-family: var(--mono); }
+.verdict.none b { color: var(--stop); }
+
+/* ---------------------------------------------------------------- the steps */
+
+.steps { counter-reset: step; margin-top: 2rem; }
+
+.step {
+  display: grid;
+  grid-template-columns: 4rem minmax(0, 15rem) minmax(0, 1fr);
+  gap: clamp(1rem, 3vw, 2.5rem);
+  align-items: start;
+  padding: 1.6rem 0;
+  border-top: 1px solid var(--rule);
+  counter-increment: step;
+  transition: background 0.2s;
+}
+
+.step:last-child { border-bottom: 1px solid var(--rule); }
+.step:hover { background: rgba(236, 234, 228, 0.02); }
+
+.step::before {
+  content: "0" counter(step);
+  font: 400 11px/1.6 var(--mono);
+  letter-spacing: 0.1em;
+  color: var(--signal);
+}
+
+.step h3 { margin: 0; font: 400 clamp(1.15rem, 2.4vw, 1.45rem)/1.2 var(--display); }
+.step p { margin: 0; font-size: 14px; color: var(--ink-dim); max-width: 58ch; }
+
+@media (max-width: 680px) {
+  .step { grid-template-columns: 2.5rem minmax(0, 1fr); }
+  .step p { grid-column: 2; margin-top: 0.5rem; }
+}
+
+/* ---------------------------------------------------------------- the stats */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  margin-top: 2rem;
+}
+
+.stat {
+  padding: 1.5rem 1.35rem;
+  background: var(--bg-sink);
+}
+
+.stat b {
+  display: block;
+  font: 400 clamp(2rem, 5vw, 2.8rem)/1 var(--display);
+  color: var(--signal);
+  font-variant-numeric: tabular-nums;
+}
+
+.stat span {
+  display: block;
+  margin-top: 0.6rem;
+  font: 400 10px/1.5 var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* ----------------------------------------------------------------- columns */
+
+.cols {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: clamp(1.5rem, 4vw, 3rem);
+  margin-top: 2rem;
+}
+
+.col h3 {
+  margin: 0 0 0.6rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--signal);
+  font: 400 1.25rem/1.2 var(--display);
+}
+
+.col p { margin: 0; font-size: 14px; color: var(--ink-dim); }
+
+/* ------------------------------------------------------------------- scope */
+
+/* The limits, in the same type as the claims. A page that lists what it does
+ * not cover is the only kind worth believing, and burying this in small grey
+ * print would undo the reason for printing it. */
+.scope {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+  gap: clamp(1.5rem, 4vw, 3rem);
+  margin-top: 2rem;
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  border: 1px solid var(--rule);
+}
+
+.scope ul { list-style: none; padding: 0; margin: 0; }
+
+.scope li {
+  position: relative;
+  padding: 0.4rem 0 0.4rem 1.5rem;
+  font: 400 13px/1.5 var(--mono);
+  color: var(--ink-dim);
+}
+
+.scope li::before {
+  position: absolute;
+  left: 0;
+  font-size: 13px;
+}
+
+.scope .yes li::before { content: "+"; color: var(--signal); }
+.scope .no li::before { content: "−"; color: var(--stop); }
+
+/* ------------------------------------------------------------------ closing */
+
+.closing {
+  margin-top: clamp(4rem, 11vw, 8rem);
+  padding: clamp(3rem, 9vw, 6rem) 0;
+  border-top: 1px solid var(--rule-hard);
+  text-align: center;
+}
+
+.closing h2 {
+  display: block;
+  margin: 0 0 1.5rem;
+  font: 400 clamp(2rem, 6vw, 3.4rem)/1.05 var(--display);
+  letter-spacing: -0.02em;
+  text-transform: none;
+  color: var(--ink);
+}
+
+.closing h2::after { display: none; }
+.closing p { margin: 0 auto 2rem; }
+.closing .cta { justify-content: center; }
+
+footer {
+  padding: 2rem 0 4rem;
+  border-top: 1px solid var(--rule);
+  font: 400 11px/1.8 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+  justify-content: space-between;
+}

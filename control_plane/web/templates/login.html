@@ -1,18 +1,25 @@
 {% extends "base.html" %}
 {% block title %}sign in · vibedeploy{% endblock %}
+{% block main_class %}entry{% endblock %}
+{% block chrome %}{% endblock %}
 {% block body %}
-<h1>Sign in</h1>
+<div class="entry-card">
+  <a class="mark" href="/" style="margin-bottom:2.5rem">vibedeploy</a>
+  <h1>Sign in</h1>
 
-{% if said %}<p class="blocked">{{ said }}</p>{% endif %}
+  {% if said %}<p class="blocked">{{ said }}</p>{% endif %}
 
-<form method="post" action="/login">
-  <input type="hidden" name="next" value="{{ next }}">
-  <label>email <input name="email" type="email" autocomplete="username" required autofocus></label>
-  <label>password <input name="password" type="password" autocomplete="current-password" required></label>
-  <button type="submit">sign in</button>
-</form>
+  <form method="post" action="/login">
+    <input type="hidden" name="next" value="{{ next }}">
+    <label>email
+      <input name="email" type="email" autocomplete="username" required autofocus></label>
+    <label>password
+      <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">sign in</button>
+  </form>
 
-<p class="muted">This console creates apps, deploys them, adds the people an
-app's policies are written about and holds the agent kill switch. There is no
-read-only view of it.</p>
+  <p class="foot">No account? <a href="/signup">create one</a>. This console
+    creates apps, deploys them and adds the people an app&rsquo;s policies are
+    written about. There is no read-only view of it.</p>
+</div>
 {% endblock %}

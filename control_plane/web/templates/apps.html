@@ -1,30 +1,54 @@
 {% extends "base.html" %}
+{% block title %}apps · vibedeploy{% endblock %}
 {% block body %}
 <h1>Apps</h1>
+<p class="muted small">Yours, and only yours. An app belongs to the account that
+  created it.</p>
 
 {% if apps %}
+<h2>Deployed here</h2>
 <table>
-  <tr><th>Name</th><th>Id</th><th>Protection</th><th>Repo</th></tr>
-  {% for app in apps %}
-  <tr>
-    <td><a href="/apps/{{ app.app_id }}">{{ app.name }}</a></td>
-    <td><code>{{ app.app_id }}</code></td>
-    <td>{{ app.protection }}</td>
-    <td class="muted">{{ app.repo }}</td>
-  </tr>
-  {% endfor %}
+  <thead>
+    <tr><th>Name</th><th>Id</th><th>Protection</th><th>Source</th></tr>
+  </thead>
+  <tbody>
+    {% for app in apps %}
+    <tr>
+      <td><a href="/apps/{{ app.app_id }}">{{ app.name }}</a></td>
+      <td><code>{{ app.app_id }}</code></td>
+      <td>
+        {% if app.protection == 'protected' %}
+        <span class="pill is-live">protected</span>
+        {% elif app.protection == 'unprotected' %}
+        <span class="pill is-blocked">unprotected</span>
+        {% else %}
+        <span class="pill">{{ app.protection }}</span>
+        {% endif %}
+      </td>
+      <td class="muted">{{ app.repo }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
 </table>
 {% else %}
-<p class="muted">Nothing deployed yet.</p>
+<h2>Nothing here yet</h2>
+<p class="muted">Give it a Python app with Postgres migrations &mdash; plain
+  <code>.sql</code> files or Alembic. It will work out the stack itself, ask
+  you what it cannot know, and show you the rules before it builds them.</p>
 {% endif %}
 
 <h2>Add an app</h2>
-<form method="post" action="/apps">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Name <input name="name" required></label>
-  <label>Repository or folder
-    <input name="repo" size="60" required
-           placeholder="https://github.com/you/your-app or C:\path\to\your-app"></label>
-  <button type="submit">Add</button>
-</form>
+<div class="panel">
+  <form method="post" action="/apps">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>name <input name="name" required placeholder="invoices"></label>
+    <label>repository or folder
+      <input name="repo" required
+             placeholder="https://github.com/you/your-app"></label>
+    <button type="submit">add</button>
+  </form>
+  <p class="muted small" style="margin:0">A <code>.env</code> next to your code
+    is never copied. The database is handed to your app by us, under a role
+    that cannot bypass its own policies.</p>
+</div>
 {% endblock %}

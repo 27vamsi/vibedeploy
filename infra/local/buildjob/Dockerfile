@@ -42,7 +42,15 @@ ENV PYTHONPATH=/vd/src \
 
 # Not root. App migrations get no reason to care who they run as, and every
 # reason not to be able to write to anything of ours.
-RUN useradd --create-home --uid 10001 vdbuild
+#
+# Group 10000 is the worker's, and is supplementary rather than primary: it is
+# how this container reads the 0640 spec the worker wrote (`write_spec`), while
+# anything this container *creates* still belongs to `vdbuild` and so stays out
+# of the worker's reach. Primary-grouping it to 10000 instead would hand the
+# worker's group every file an app's migrations leave behind.
+RUN groupadd --gid 10000 vdspec \
+ && useradd --create-home --uid 10001 vdbuild \
+ && usermod --append --groups vdspec vdbuild
 
 # The app's own packages are mounted here from a docker volume, and a volume
 # being created for the first time copies this directory's ownership. Without
